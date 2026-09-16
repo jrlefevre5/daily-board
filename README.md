@@ -88,19 +88,30 @@ Any provider that can POST `from` + `body` (form or JSON) to that URL works
 too — set `SMS_WEBHOOK_SECRET` and have it send the value as an
 `X-Webhook-Secret` header.
 
-## Deploy (Supabase + Vercel)
+## Deploy (about five minutes, free tiers)
 
-1. **Database:** create a Supabase project and copy the *Transaction pooler*
-   connection URI (Connect → Transaction pooler), password filled in.
-2. **App:** create a Vercel project from this repository (framework preset:
-   *Other*). Environment variables: `DATABASE_URL`, and `TWILIO_AUTH_TOKEN` if
-   you use text-in. Deploy.
-3. Open the site, sign in with PIN `1234`, set the board password, change the
-   PIN, add goals, tasks, and staff.
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fjrlefevre5%2Fdaily-board&project-name=daily-board&repository-name=daily-board&env=DATABASE_URL&envDescription=Postgres%20connection%20string%20(Neon%2C%20Supabase%2C%20or%20any%20Postgres)&envLink=https%3A%2F%2Fgithub.com%2Fjrlefevre5%2Fdaily-board%23database)
 
-Tables get Row Level Security enabled with no policies, which makes them
-invisible to Supabase's public REST API; the app itself connects directly as
-the database owner.
+**The short way (Vercel + Neon, one place):**
+
+1. Sign in at [vercel.com](https://vercel.com) with GitHub → **Add New → Project**
+   → import `daily-board` → framework preset **Other** → Deploy (the first build
+   fails without a database — expected, keep going).
+2. In the project: **Storage → Create Database → Neon (Postgres)** → Create and
+   connect. Neon adds `DATABASE_URL` to the project for you.
+3. **Deployments → Redeploy.** Open the site.
+4. **Manager** → PIN `1234` → **Settings**: set a board password, change the
+   PIN → **Branding**: name, logo, colors → **Staff**, **Goals**, **Tasks**.
+
+<a id="database"></a>**Using Supabase instead:** create a project, copy the
+*Transaction pooler* URI (Connect → Transaction pooler, password filled in) and
+set it as `DATABASE_URL` under the Vercel project's Settings → Environment
+Variables, then redeploy. Any Postgres 13+ works the same way.
+
+Add `TWILIO_AUTH_TOKEN` as a second environment variable when you set up
+text-in. Tables create themselves on the first request; on Supabase they get
+Row Level Security enabled with no policies, which hides them from its public
+REST API (the app connects directly as the database owner).
 
 ## Files
 
