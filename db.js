@@ -5,13 +5,23 @@ require('dotenv').config();
 const crypto = require('node:crypto');
 const { Pool } = require('pg');
 
-if (!process.env.DATABASE_URL) {
+// The connection string: DATABASE_URL, or whatever a hosting integration
+// named it (Vercel's Neon/Postgres add-ons use POSTGRES_URL or <PREFIX>_URL).
+function connectionString() {
+  const env = process.env;
+  for (const k of ['DATABASE_URL', 'POSTGRES_URL', 'STORAGE_URL', 'NEON_DATABASE_URL', 'POSTGRES_PRISMA_URL'])
+    if (env[k] && /^postgres/i.test(env[k])) return env[k];
+  const any = Object.keys(env).find(k => /_URL$/.test(k) && /^postgres(ql)?:\/\//i.test(env[k] || ''));
+  return any ? env[any] : '';
+}
+const DATABASE_URL = connectionString();
+if (!DATABASE_URL) {
   console.error('\nMissing DATABASE_URL. Copy .env.example to .env and fill in your Postgres connection string.\n');
 }
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL || '') ? undefined : { rejectUnauthorized: false },
+  connectionString: DATABASE_URL,
+  ssl: /localhost|127\.0\.0\.1/.test(DATABASE_URL) ? undefined : { rejectUnauthorized: false },
   max: 3, // serverless-friendly
 });
 
