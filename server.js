@@ -8,7 +8,7 @@ const db = require('./db');
 const { q, one, ready } = db;
 
 const app = express();
-app.use(express.json({ limit: '2mb' })); // drawn signatures are small PNGs
+app.use(express.json({ limit: '2mb' })); // drawn signatures and uploaded logos are small PNGs
 
 // Security headers on every response.
 app.use((req, res, next) => {
@@ -104,12 +104,7 @@ function managerOnly(req, res, next) {
 
 // Public branding for the sign-in screen.
 app.get('/api/config', wrap(async (req, res) => {
-  res.json({
-    business_name: await db.getSetting('business_name', 'Daily Board'),
-    theme_color: await db.getSetting('theme_color', ''),
-    logo_url: await db.getSetting('logo_url', ''),
-    board_pass_set: !!(await db.getSetting('board_pass', '')).trim(),
-  });
+  res.json({ ...(await db.branding()), board_pass_set: !!(await db.getSetting('board_pass', '')).trim() });
 }));
 
 // Sign in with either the board password or the manager PIN.

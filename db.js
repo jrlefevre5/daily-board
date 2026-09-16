@@ -157,14 +157,21 @@ END $$;
 `;
 
 // Bump when DDL or defaults change; a mismatch replays the (idempotent) migration.
-const SCHEMA_VERSION = '1';
+const SCHEMA_VERSION = '2';
 
 async function ensureDefaults() {
   const setDefault = (k, v) => q('INSERT INTO settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO NOTHING', [k, v]);
   await setDefault('business_name', 'Daily Board');
   await setDefault('timezone', 'America/Denver');
-  await setDefault('theme_color', '#1f6feb');
+  // Branding (Manager panel -> Branding)
+  await setDefault('tagline', '');
+  await setDefault('welcome_text', '');
+  await setDefault('theme_color', '#1f6feb');   // accent: buttons, highlights
+  await setDefault('theme_topbar', '#111827');  // the bar across the top
+  await setDefault('theme_bg', '#f4f6f9');      // page background
+  await setDefault('font', 'system');
   await setDefault('logo_url', '');
+  await setDefault('logo_data', '');            // uploaded logo as a data URL
   await setDefault('manager_pin', '1234');    // change it in Manager panel -> Settings!
   await setDefault('board_pass', '');         // blank = only managers can open the board
   await setDefault('sms_number', '');
@@ -187,4 +194,16 @@ const ready = (async () => {
 // Don't crash the process on startup failure — requests get a clean 500 instead.
 ready.catch(err => console.error('Database init failed:', err.message));
 
-module.exports = { q, one, pool, ready, getSetting, getAllSettings, setSetting, clearSettingsCache };
+// Everything the pages need to draw themselves in the business's colors.
+const FONTS = ['system', 'Inter', 'Roboto', 'Poppins', 'Nunito', 'Montserrat', 'Lora', 'Work Sans'];
+async function branding() {
+  const s = await loadSettings();
+  return {
+    business_name: s.business_name || 'Daily Board', tagline: s.tagline || '', welcome_text: s.welcome_text || '',
+    theme_color: s.theme_color || '#1f6feb', theme_topbar: s.theme_topbar || '#111827', theme_bg: s.theme_bg || '#f4f6f9',
+    font: FONTS.includes(s.font) ? s.font : 'system',
+    logo: s.logo_data || s.logo_url || '', logo_url: s.logo_url || '', has_logo_upload: !!s.logo_data,
+  };
+}
+
+module.exports = { q, one, pool, ready, getSetting, getAllSettings, setSetting, clearSettingsCache, branding, FONTS };

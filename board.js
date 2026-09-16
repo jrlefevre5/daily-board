@@ -125,6 +125,7 @@ function mount(app, deps) {
          JOIN announcements n ON n.id = a.announcement_id WHERE n.active = 1 ORDER BY a.id`),
       db.getAllSettings(),
     ]);
+    const brand = await db.branding();
     const byGoal = {};
     for (const e of entries) (byGoal[e.goal_id] = byGoal[e.goal_id] || []).push({ ...e, amount: Number(e.amount) });
     const doneBy = {};
@@ -143,7 +144,7 @@ function mount(app, deps) {
     }
     return {
       today: todayStr, date, week_start: ws, week_end: addDays(ws, 6), timezone: settings.timezone || 'UTC',
-      business_name: settings.business_name || 'Daily Board', theme_color: settings.theme_color || '', logo_url: settings.logo_url || '',
+      ...brand,
       sms_number: settings.sms_number || '', board_pass_set: !!(settings.board_pass || '').trim(),
       staff: staff.map(s => ({ id: s.id, name: s.name, role: s.role, has_pin: !!s.pin })),
       goals: goals.map(g => ({ id: g.id, label: g.label, unit: g.unit, target: Number(g.target),
@@ -268,8 +269,9 @@ function mount(app, deps) {
       goal_templates: goal_templates.map(t => ({ ...t, target: Number(t.target) })),
       goals: goals.map(g => ({ ...g, target: Number(g.target) })),
       tasks, announcements, sms_log, completions, goal_entries: entries,
+      branding: await db.branding(),
       settings: {
-        business_name: s.business_name || '', timezone: s.timezone || '', theme_color: s.theme_color || '', logo_url: s.logo_url || '',
+        timezone: s.timezone || '',
         board_pass: s.board_pass || '', manager_pin: s.manager_pin || '',
         sms_number: s.sms_number || '', sms_default_kind: s.sms_default_kind || 'announcement',
         sms_secured: !!(process.env.TWILIO_AUTH_TOKEN || process.env.SMS_WEBHOOK_SECRET),
@@ -381,23 +383,50 @@ function mount(app, deps) {
     res.json({ ok: true });
   }));
 
-  app.post('/api/manager/settings', managerOnly, wrap(async (req, res) => {
+  // Branding: name, tagline, welcome text, logo (uploaded data URL or link), colors, font.
+  app.post('/api/manager/branding', managerOnly, wrap(async (req, res) => {
     const b = req.body || {};
+    if (b.reset) {
+      for (const k of ['tagline', 'welcome_text', 'logo_url', 'logo_data']) await db.setSetting(k, '');
+      await db.setSetting('theme_color', '#1f6feb'); await db.setSetting('theme_topbar', '#111827'); await db.setSetting('theme_bg', '#f4f6f9');
+      await db.setSetting('font', 'system');
+      return res.json({ ok: true, branding: await db.branding() });
+    }
     const out = {};
     if (b.business_name != null) out.business_name = clean(b.business_name, 80) || 'Daily Board';
-    if (b.timezone != null) {
-      if (!validTz(String(b.timezone).trim())) return res.status(400).json({ error: 'Unknown timezone — use an IANA name like America/Denver.' });
-      out.timezone = String(b.timezone).trim();
+    if (b.tagline != null) out.tagline = clean(b.tagline, 120);
+    if (b.welcome_text != null) out.welcome_text = clean(b.welcome_text, 600);
+    for (const k of ['theme_color', 'theme_topbar', 'theme_bg']) {
+      if (b[k] == null) continue;
+      const c = clean(b[k], 7);
+      if (!/^#[0-9a-f]{6}$/i.test(c)) return res.status(400).json({ error: 'Colors must be hex, like #1f6feb.' });
+      out[k] = c.toLowerCase();
     }
-    if (b.theme_color != null) {
-      const c = clean(b.theme_color, 7);
-      if (c && !/^#[0-9a-f]{6}$/i.test(c)) return res.status(400).json({ error: 'Theme color must look like #1f6feb.' });
-      out.theme_color = c;
+    if (b.font != null) {
+      if (!db.FONTS.includes(b.font)) return res.status(400).json({ error: 'Pick a font from the list.' });
+      out.font = b.font;
     }
     if (b.logo_url != null) {
       const u = clean(b.logo_url, 1000);
       if (u && !/^https?:\/\//i.test(u)) return res.status(400).json({ error: 'Logo link must start with http(s)://' });
       out.logo_url = u;
+    }
+    if (b.logo_data != null) {
+      const d = String(b.logo_data).trim();
+      if (d && !/^data:image\/(png|jpeg|webp|svg\+xml|gif);base64,[A-Za-z0-9+/=]+$/.test(d)) return res.status(400).json({ error: 'The logo must be a PNG, JPEG, WebP, GIF, or SVG image.' });
+      if (d.length > 400000) return res.status(400).json({ error: 'That logo is too large — please use an image under 300 KB.' });
+      out.logo_data = d;
+    }
+    for (const [k, v] of Object.entries(out)) await db.setSetting(k, v);
+    res.json({ ok: true, branding: await db.branding() });
+  }));
+
+  app.post('/api/manager/settings', managerOnly, wrap(async (req, res) => {
+    const b = req.body || {};
+    const out = {};
+    if (b.timezone != null) {
+      if (!validTz(String(b.timezone).trim())) return res.status(400).json({ error: 'Unknown timezone — use an IANA name like America/Denver.' });
+      out.timezone = String(b.timezone).trim();
     }
     if (b.board_pass != null) out.board_pass = clean(b.board_pass, 60);
     if (b.manager_pin != null) {

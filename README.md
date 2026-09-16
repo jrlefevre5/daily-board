@@ -43,7 +43,15 @@ refreshes itself every minute).
 **The manager panel** (manager PIN) manages recurring goals and per-day
 overrides, tasks, announcements, the staff roster (optional per-person PIN so
 nobody signs as someone else), a 30-day activity log with CSV export, text-in
-setup, and settings (business name, timezone, accent color, logo, passwords).
+setup, branding, and settings (timezone, passwords, text-in number).
+
+**Branding** (Manager panel → Branding) makes the board look like the business:
+name and tagline, a welcome message for the sign-in screen, a logo (upload an
+image — it's shrunk and stored in the database, no file hosting needed — or
+link to one), accent / top-bar / page-background colors, and a font. A live
+preview follows every change; the browser-tab icon follows the logo or accent
+color; text on the top bar and buttons flips to dark automatically on light
+colors. *Reset to defaults* puts it all back.
 
 ## Post by text message
 

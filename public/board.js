@@ -65,27 +65,59 @@ async function loadBoard() {
   applyBranding(data);
   render();
 }
+// ---- branding (Manager panel → Branding) ----
+const SYSTEM_FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+const DEFAULT_BRAND = { business_name: 'Daily Board', tagline: '', welcome_text: '', theme_color: '#1f6feb', theme_topbar: '#111827', theme_bg: '#f4f6f9', font: 'system', logo: '' };
+// White or near-black text, whichever reads better on the given hex color.
+function inkOn(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '').trim());
+  if (!m) return '#ffffff';
+  const [r, g, b] = [0, 2, 4].map(i => parseInt(m[1].slice(i, i + 2), 16) / 255).map(c => c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  return (0.2126 * r + 0.7152 * g + 0.0722 * b) > 0.4 ? '#111827' : '#ffffff';
+}
+function fontStack(font) { return !font || font === 'system' ? SYSTEM_FONT : `"${font}", ${SYSTEM_FONT}`; }
+function loadFont(font) {
+  if (!font || font === 'system') return;
+  const id = 'font-' + font.replace(/\W/g, '');
+  if (document.getElementById(id)) return;
+  const l = document.createElement('link'); l.id = id; l.rel = 'stylesheet';
+  l.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(font).replace(/%20/g, '+')}:wght@400;600;700;800&display=swap`;
+  document.head.appendChild(l);
+}
+// Writes a brand's colors/font onto an element as CSS variables (the page root, or the preview card).
+function brandVars(el, b) {
+  const r = el.style;
+  const accent = b.theme_color || DEFAULT_BRAND.theme_color, top = b.theme_topbar || DEFAULT_BRAND.theme_topbar;
+  r.setProperty('--accent', accent);
+  r.setProperty('--accent-soft', `color-mix(in srgb, ${accent} 12%, white)`);
+  r.setProperty('--accent-ink', `color-mix(in srgb, ${accent} 70%, black)`);
+  r.setProperty('--on-accent', inkOn(accent));
+  r.setProperty('--topbar', top);
+  r.setProperty('--topbar-ink', inkOn(top));
+  r.setProperty('--bg', b.theme_bg || DEFAULT_BRAND.theme_bg);
+  r.setProperty('--font', fontStack(b.font));
+  loadFont(b.font);
+}
+function markHtml(b) { return b.logo ? `<img src="${attr(b.logo)}" alt="">` : '✓'; }
 function applyBranding(b) {
-  if (b.theme_color) {
-    const r = document.documentElement.style;
-    r.setProperty('--accent', b.theme_color);
-    r.setProperty('--accent-soft', `color-mix(in srgb, ${b.theme_color} 12%, white)`);
-    r.setProperty('--accent-ink', `color-mix(in srgb, ${b.theme_color} 70%, black)`);
-  }
+  if (!b) return;
+  brandVars(document.documentElement, b);
   const name = b.business_name || 'Daily Board';
   document.getElementById('brandName').textContent = name;
+  document.getElementById('brandTag').textContent = b.tagline || '';
   document.title = name;
-  const mark = document.querySelector('.topbar .mark');
-  if (mark && b.logo_url) mark.outerHTML = `<img class="mark" src="${attr(b.logo_url)}" alt="" style="object-fit:contain;background:#fff">`;
+  const mark = document.getElementById('brandMark');
+  mark.innerHTML = markHtml(b); mark.classList.toggle('logo', !!b.logo);
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='${b.theme_color || DEFAULT_BRAND.theme_color}'/><path d='M18 34l10 10 18-22' fill='none' stroke='${inkOn(b.theme_color)}' stroke-width='7' stroke-linecap='round' stroke-linejoin='round'/></svg>`;
+  document.getElementById('favicon').href = b.logo || 'data:image/svg+xml,' + encodeURIComponent(svg);
 }
 
 function renderLogin(err) {
   stopTimers();
   document.getElementById('topRight').textContent = '';
   $app.innerHTML = `<div class="login">
-    <h1>${esc(cfg.business_name || 'Daily Board')}</h1>
-    <p class="lead">The team's shared screen: today's sales goals, the daily and weekly checklists, and announcements from
-      management — every item signed off by whoever handled it.</p>
+    <div class="hero">${cfg.logo ? `<img src="${attr(cfg.logo)}" alt="">` : ''}<div><h1>${esc(cfg.business_name || 'Daily Board')}</h1>${cfg.tagline ? `<div class="tagline">${esc(cfg.tagline)}</div>` : ''}</div></div>
+    <p class="lead">${esc(cfg.welcome_text || "The team's shared screen: today's sales goals, the daily and weekly checklists, and announcements from management — every item signed off by whoever handled it.")}</p>
     ${err ? `<div class="notice warn">${esc(err)}</div>` : ''}
     <div class="grid2">
       <div class="panel">
@@ -439,18 +471,19 @@ async function reloadMgr() {
 }
 
 function renderManager() {
-  const tabs = [['goals', 'Goals'], ['tasks', 'Tasks'], ['announcements', 'Announcements'], ['staff', 'Staff'], ['sms', 'Text-in'], ['activity', 'Activity'], ['settings', 'Settings']];
+  const tabs = [['goals', 'Goals'], ['tasks', 'Tasks'], ['announcements', 'Announcements'], ['staff', 'Staff'], ['sms', 'Text-in'], ['activity', 'Activity'], ['branding', 'Branding'], ['settings', 'Settings']];
   document.getElementById('topRight').textContent = 'Manager panel';
   $app.innerHTML = `
     <div class="bar">
-      <div class="date"><small>Manager panel</small>${esc(mgr.settings.business_name || 'Daily Board')}</div>
+      <div class="date"><small>Manager panel</small>${esc(mgr.branding.business_name || 'Daily Board')}</div>
       <input class="inline" value="${attr(mgrName)}" placeholder="Your name (shown on posts)" onchange="setMgrName(this.value)" style="max-width:220px">
       <div class="spacer"></div>
       <button class="small ghost" onclick="closeManager()">‹ Back to the board</button>
       <button class="mini-btn" onclick="managerLogout()">Sign out</button>
     </div>
     <div class="tabs">${tabs.map(([k, l]) => `<button class="${mgrTab === k ? 'on' : ''}" onclick="mgrTabTo('${k}')">${l}</button>`).join('')}</div>
-    <div class="panel">${({ goals: mgrGoals, tasks: mgrTasks, announcements: mgrAnns, staff: mgrStaff, sms: mgrSms, activity: mgrActivity, settings: mgrSettings })[mgrTab]()}</div>`;
+    <div class="panel">${({ goals: mgrGoals, tasks: mgrTasks, announcements: mgrAnns, staff: mgrStaff, sms: mgrSms, activity: mgrActivity, branding: mgrBranding, settings: mgrSettings })[mgrTab]()}</div>`;
+  if (mgrTab === 'branding') brandPreview();
 }
 
 const onoff = a => a ? '' : '<span class="chip">Off</span>';
@@ -632,10 +665,8 @@ function mgrSettings() {
   const f = (id, label, val, help, extra = '') => `<label for="${id}">${label}</label><input class="inline" id="${id}" value="${attr(val)}" style="width:100%" ${extra}>${help ? `<div class="help">${help}</div>` : ''}`;
   return `<div class="settings" style="max-width:560px">
     <b>Business</b>
-    ${f('st_name', 'Business name', s.business_name, 'Shown in the top bar and on the sign-in screen.')}
     ${f('st_tz', 'Timezone', s.timezone, 'IANA name, e.g. America/Denver, America/Chicago, America/New_York — decides when "today" rolls over.', 'placeholder="America/Denver"')}
-    ${f('st_color', 'Accent color', s.theme_color, 'Hex color for buttons and highlights.', 'placeholder="#1f6feb" style="width:160px"')}
-    ${f('st_logo', 'Logo image link (optional)', s.logo_url, 'A square-ish PNG/SVG shown in the top bar.', 'placeholder="https://…"')}
+    <div class="help" style="margin-top:8px">Name, logo, colors, and fonts live under the <a href="#" onclick="mgrTabTo('branding'); return false">Branding</a> tab.</div>
     <b style="display:block;margin-top:22px">Access</b>
     ${f('st_pass', 'Board password', s.board_pass, 'What the team enters on the board device. Blank = only managers can open the board. Changing it signs every board device out.')}
     ${f('st_pin', 'Manager PIN', s.manager_pin, 'Unlocks this panel. Change it from the default!')}
@@ -653,15 +684,143 @@ function mgrSettings() {
 window.saveSettings = async () => {
   const g = id => document.getElementById(id).value.trim();
   const out = await api('/api/manager/settings', {
-    business_name: g('st_name'), timezone: g('st_tz'), theme_color: g('st_color'), logo_url: g('st_logo'),
-    board_pass: g('st_pass'), manager_pin: g('st_pin'), sms_number: g('st_num'), sms_default_kind: g('st_kind'),
+    timezone: g('st_tz'), board_pass: g('st_pass'), manager_pin: g('st_pin'), sms_number: g('st_num'), sms_default_kind: g('st_kind'),
   });
   if (out.error) { document.getElementById('st_err').textContent = out.error; return; }
   if (out.token) { mgrToken = out.token; sessionStorage.setItem('db_mgr_token', mgrToken); }
   // The board token was minted against the old password; drop it if the password changed.
   if (boardToken && g('st_pass') !== mgr.settings.board_pass) { boardToken = ''; localStorage.removeItem('db_board_token'); }
-  cfg = { ...cfg, business_name: g('st_name'), theme_color: g('st_color'), logo_url: g('st_logo') };
-  applyBranding(cfg);
+  await reloadMgr();
+};
+
+// ---------- Branding tab ----------
+// brandDraft holds the unsaved form state so the preview can follow every keystroke.
+let brandDraft = null;
+const FONT_CHOICES = ['system', 'Inter', 'Roboto', 'Poppins', 'Nunito', 'Montserrat', 'Lora', 'Work Sans'];
+function mgrBranding() {
+  const b = mgr.branding;
+  brandDraft = { business_name: b.business_name, tagline: b.tagline, welcome_text: b.welcome_text, theme_color: b.theme_color,
+    theme_topbar: b.theme_topbar, theme_bg: b.theme_bg, font: b.font, logo_url: b.logo_url, logo_data: b.has_logo_upload ? b.logo : '' };
+  const color = (k, label, help) => `<label>${label}</label>
+    <div class="color-row"><input type="color" value="${attr(brandDraft[k])}" oninput="brandSet('${k}', this.value)">
+    <input class="inline" value="${attr(brandDraft[k])}" maxlength="7" oninput="brandSet('${k}', this.value)" placeholder="#1f6feb"><span class="help">${help}</span></div>`;
+  return `<p class="kicker-note">Make the board look like your business. Changes show in the preview as you type; nothing is applied until you save.</p>
+  <div class="brand-grid">
+    <div class="settings">
+      <label>Business name</label><input class="inline" style="width:100%" value="${attr(brandDraft.business_name)}" maxlength="80" oninput="brandSet('business_name', this.value)">
+      <label>Tagline (optional)</label><input class="inline" style="width:100%" value="${attr(brandDraft.tagline)}" maxlength="120" placeholder="e.g. Main Street store" oninput="brandSet('tagline', this.value)">
+      <div class="help">Shown under the name in the top bar and on the sign-in screen.</div>
+      <label>Welcome text on the sign-in screen (optional)</label>
+      <textarea class="inline" style="width:100%;min-height:70px" maxlength="600" placeholder="A sentence or two your team sees before opening the board." oninput="brandSet('welcome_text', this.value)">${esc(brandDraft.welcome_text)}</textarea>
+      <label>Logo</label>
+      <div class="logo-box">
+        <div class="thumb" id="br_thumb"></div>
+        <div>
+          <input type="file" id="br_file" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml" style="display:none" onchange="brandLogoFile(this)">
+          <button class="small ghost" type="button" onclick="document.getElementById('br_file').click()">Upload image…</button>
+          <button class="mini-btn" type="button" onclick="brandLogoClear()">Remove</button>
+          <div class="help">PNG, JPEG, WebP, GIF, or SVG. It's shrunk to fit and shown in the top bar, the sign-in screen, and as the browser-tab icon.</div>
+        </div>
+      </div>
+      <label>…or a logo link instead of an upload</label>
+      <input class="inline" style="width:100%" value="${attr(brandDraft.logo_url)}" placeholder="https://…/logo.png" oninput="brandSet('logo_url', this.value)">
+      ${color('theme_color', 'Accent color', 'buttons, progress bars, highlights')}
+      ${color('theme_topbar', 'Top bar color', 'the bar across the top of every screen')}
+      ${color('theme_bg', 'Page background', 'behind the cards')}
+      <label>Font</label>
+      <select class="inline" style="width:100%" onchange="brandSet('font', this.value)">
+        ${FONT_CHOICES.map(f => `<option value="${f}" ${brandDraft.font === f ? 'selected' : ''}>${f === 'system' ? 'System default (fastest)' : f}</option>`).join('')}
+      </select>
+      <div class="help">Named fonts load from Google Fonts.</div>
+      <div class="err" id="br_err" style="color:var(--red);font-size:13px;margin-top:10px;min-height:1em"></div>
+      <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="small green" onclick="saveBranding()">Save branding</button>
+        <button class="small ghost" onclick="resetBranding()">Reset to defaults</button>
+      </div>
+    </div>
+    <div>
+      <div class="preview" id="br_preview">
+        <div class="ptop"><span class="mark" id="bp_mark"></span><span><span id="bp_name"></span><span class="tag" id="bp_tag"></span></span></div>
+        <div class="plabel">Preview</div>
+        <div class="pbody">
+          <div class="panel"><h2>Sales goals <span class="count">1 of 2 met</span></h2>
+            <div class="goal met"><div class="met-tag">MET ✓</div><div class="lbl">Units sold</div><div class="nums">27 <small>/ 25</small></div><div class="track"><div class="fill" style="width:100%"></div></div></div>
+            <div class="goal" style="margin-top:10px"><div class="lbl">Revenue</div><div class="nums">$640 <small>/ $1,200</small></div><div class="track"><div class="fill" style="width:53%"></div></div>
+              <div class="foot"><span class="who">Last: Sam +$120</span><button class="small">+ Log</button></div></div>
+          </div>
+          <div class="panel"><h2>Today's tasks</h2>
+            <div class="task done"><div class="box">✓</div><div class="body"><div class="title">Wipe down the counters</div><div class="signed">Signed off by Sam · 9:12 AM</div></div></div>
+            <div class="task"><div class="box"></div><div class="body"><div class="title">Restock the front shelves <span class="chip sms">Texted in</span></div></div><div class="act"><button class="small">Sign off</button></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+window.brandSet = (k, v) => {
+  if (!brandDraft) return;
+  brandDraft[k] = v;
+  if (k === 'logo_url' && v.trim()) brandDraft.logo_data = '';
+  if (k.startsWith('theme_')) { // keep the swatch and the hex box in step
+    const row = event && event.target && event.target.closest('.color-row');
+    if (row && /^#[0-9a-f]{6}$/i.test(v)) for (const i of row.querySelectorAll('input')) if (i !== event.target) i.value = v;
+  }
+  brandPreview();
+};
+function brandPreview() {
+  if (!brandDraft) return;
+  const p = document.getElementById('br_preview');
+  if (!p) return;
+  const b = { ...brandDraft, logo: brandDraft.logo_data || brandDraft.logo_url.trim() };
+  const okHex = c => /^#[0-9a-f]{6}$/i.test(c);
+  brandVars(p, { ...b, theme_color: okHex(b.theme_color) ? b.theme_color : DEFAULT_BRAND.theme_color,
+    theme_topbar: okHex(b.theme_topbar) ? b.theme_topbar : DEFAULT_BRAND.theme_topbar, theme_bg: okHex(b.theme_bg) ? b.theme_bg : DEFAULT_BRAND.theme_bg });
+  document.getElementById('bp_name').textContent = b.business_name || 'Daily Board';
+  document.getElementById('bp_tag').textContent = b.tagline || '';
+  const mark = document.getElementById('bp_mark'); mark.innerHTML = markHtml(b); mark.classList.toggle('logo', !!b.logo);
+  document.getElementById('br_thumb').innerHTML = b.logo ? `<img src="${attr(b.logo)}" alt="">` : '<span>No logo</span>';
+}
+// Shrinks an uploaded image to at most 512px on its long side and keeps it as a PNG data URL
+// (SVGs are kept as-is); the result is stored in the settings table, no file hosting needed.
+window.brandLogoFile = async input => {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const err = document.getElementById('br_err'); err.textContent = '';
+  try {
+    let dataUrl;
+    if (file.type === 'image/svg+xml') {
+      if (file.size > 200 * 1024) throw new Error('That SVG is over 200 KB — please simplify it.');
+      dataUrl = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file); });
+    } else {
+      const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error("That file doesn't look like an image.")); i.src = URL.createObjectURL(file); });
+      for (const max of [512, 256, 160]) {
+        const s = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+        const c = document.createElement('canvas'); c.width = Math.round(img.naturalWidth * s); c.height = Math.round(img.naturalHeight * s);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        dataUrl = c.toDataURL('image/png');
+        if (dataUrl.length <= 380000) break;
+      }
+      if (dataUrl.length > 380000) throw new Error('That image is too detailed to store — try a simpler or smaller logo.');
+    }
+    brandDraft.logo_data = dataUrl; brandDraft.logo_url = '';
+    const link = document.querySelector('.brand-grid input[placeholder^="https"]'); if (link) link.value = '';
+    brandPreview();
+  } catch (e) { err.textContent = e.message || 'Could not read that file.'; }
+  input.value = '';
+};
+window.brandLogoClear = () => { brandDraft.logo_data = ''; brandDraft.logo_url = ''; const link = document.querySelector('.brand-grid input[placeholder^="https"]'); if (link) link.value = ''; brandPreview(); };
+window.saveBranding = async () => {
+  const err = document.getElementById('br_err'); err.textContent = '';
+  const out = await api('/api/manager/branding', { ...brandDraft, logo_url: brandDraft.logo_url.trim() });
+  if (out.error) { err.textContent = out.error; return; }
+  cfg = { ...cfg, ...out.branding }; applyBranding(out.branding);
+  await reloadMgr();
+};
+window.resetBranding = async () => {
+  if (!confirm('Reset name, logo, colors, and font to the defaults?')) return;
+  const out = await api('/api/manager/branding', { reset: true });
+  if (out.error) { alert(out.error); return; }
+  cfg = { ...cfg, ...out.branding }; applyBranding(out.branding);
   await reloadMgr();
 };
 
