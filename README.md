@@ -31,6 +31,11 @@ refreshes itself every minute).
 - **Sales goals** — recurring goals (e.g. *Units sold 25*, *Revenue $1,200*)
   copy onto every new day. Employees tap **+ Log**, pick their name, sign, and
   the goal ticks up. Each entry is recorded with who/when/note.
+  **Import last year:** under Manager panel → Goals, upload or paste last
+  year's daily numbers (a POS/spreadsheet export — one date and amount per
+  line; headers and totals are skipped), choose *same calendar date* or *same
+  weekday* this year, and a % uplift (default +5%). Every covered day then gets
+  its own target automatically and the card shows the LY number it came from.
 - **Today's tasks** — daily tasks (reset every day) plus one-time tasks for that
   day. **This week** — weekly tasks (Mon–Sun), optionally due on a weekday.
   Signing off records the person, time, an optional note, a drawn signature

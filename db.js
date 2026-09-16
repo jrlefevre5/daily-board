@@ -81,6 +81,17 @@ CREATE TABLE IF NOT EXISTS goals (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS goals_day_tpl_idx ON goals (date, template_id) WHERE template_id IS NOT NULL;
+ALTER TABLE goals ADD COLUMN IF NOT EXISTS baseline NUMERIC(12,2);   -- e.g. last year's number the target was built from
+-- Imported per-day targets for a recurring goal (e.g. last year's daily revenue
+-- + 5%). When a day is materialized, its row here overrides the template target.
+CREATE TABLE IF NOT EXISTS goal_schedule (
+  id SERIAL PRIMARY KEY,
+  template_id INTEGER NOT NULL REFERENCES goal_templates(id) ON DELETE CASCADE,
+  date TEXT NOT NULL,
+  target NUMERIC(12,2) NOT NULL,
+  baseline NUMERIC(12,2),
+  UNIQUE (template_id, date)
+);
 CREATE TABLE IF NOT EXISTS goal_entries (
   id SERIAL PRIMARY KEY,
   goal_id INTEGER NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
@@ -167,7 +178,7 @@ END $$;
 `;
 
 // Bump when DDL or defaults change; a mismatch replays the (idempotent) migration.
-const SCHEMA_VERSION = '2';
+const SCHEMA_VERSION = '3';
 
 async function ensureDefaults() {
   const setDefault = (k, v) => q('INSERT INTO settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO NOTHING', [k, v]);

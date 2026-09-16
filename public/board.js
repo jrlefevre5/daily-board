@@ -237,7 +237,7 @@ const goalCard = canSign => g => {
   const last = g.entries[g.entries.length - 1];
   return `<div class="goal ${met ? 'met' : ''}">
     ${met ? '<div class="met-tag">MET ✓</div>' : ''}
-    <div class="lbl">${esc(g.label)}</div>
+    <div class="lbl">${esc(g.label)}${g.baseline != null ? ` <span class="chip" title="Last year's number this goal is based on">LY ${esc(fmtAmt(g.baseline, g.unit))}</span>` : ''}</div>
     <div class="nums">${esc(fmtAmt(g.actual, g.unit))} <small>/ ${esc(fmtAmt(g.target, g.unit))}</small></div>
     <div class="track"><div class="fill" style="width:${pct}%"></div></div>
     <div class="foot">
@@ -497,9 +497,16 @@ function mgrGoals() {
         <td class="acts"><button class="mini-btn" onclick="editGoalTemplate(${t.id})">Edit</button> <button class="mini-btn danger" onclick="delGoalTemplate(${t.id})">Delete</button></td></tr>`).join('')
         || '<tr><td colspan="4" class="empty">None yet — add things like "Units sold", "New accounts", "Revenue"…</td></tr>'}
     </table>
+    <div class="tools" style="margin-top:22px"><b>Imported daily targets</b><span class="mini">e.g. last year's revenue by day, +5% — overrides the daily target on each date it covers.</span><div class="spacer"></div><button class="small" onclick="importSchedule()">Import from last year…</button></div>
+    <table class="list"><tr><th>Goal</th><th>Days covered</th><th>From</th><th>To</th><th></th></tr>
+      ${mgr.goal_schedule.map(s => { const t = mgr.goal_templates.find(x => x.id === s.template_id) || { label: '?' };
+        return `<tr><td>${esc(t.label)}</td><td>${s.days} <span class="mini">(${s.days_ahead} from today)</span></td><td>${esc(fmtShort(s.from_date))}</td><td>${esc(fmtShort(s.to_date))}</td>
+        <td class="acts"><button class="mini-btn" onclick="importSchedule(${s.template_id})">Replace</button> <button class="mini-btn danger" onclick="clearSchedule(${s.template_id})">Clear</button></td></tr>`; }).join('')
+        || '<tr><td colspan="5" class="empty">Nothing imported. Add a recurring goal first, then import a list of dates and amounts.</td></tr>'}
+    </table>
     <div class="tools" style="margin-top:22px"><b>Today's goals (${esc(fmtShort(mgr.today))})</b><div class="spacer"></div><button class="small ghost" onclick="editGoalDay()">+ One-time goal for a day</button></div>
     <table class="list"><tr><th>Goal</th><th>Unit</th><th>Target</th><th>Source</th><th></th></tr>
-      ${todays.map(g => `<tr><td>${esc(g.label)}</td><td>${g.unit}</td><td>${esc(fmtAmt(g.target, g.unit))}</td><td class="mini">${g.source}</td>
+      ${todays.map(g => `<tr><td>${esc(g.label)}</td><td>${g.unit}</td><td>${esc(fmtAmt(g.target, g.unit))}${g.baseline != null ? ` <span class="mini">(LY ${esc(fmtAmt(g.baseline, g.unit))})</span>` : ''}</td><td class="mini">${g.source}</td>
         <td class="acts"><button class="mini-btn" onclick="editGoalDay(${g.id})">Edit</button> <button class="mini-btn danger" onclick="delGoalDay(${g.id})">Remove</button></td></tr>`).join('')
         || '<tr><td colspan="5" class="empty">Nothing for today yet (recurring goals appear the first time the board is opened today).</td></tr>'}
     </table>`;
@@ -523,6 +530,69 @@ window.editGoalDay = id => {
     { k: 'unit', l: 'Unit', v: g.unit, type: 'select', opts: [['count', 'Count'], ['dollars', 'Dollars ($)']] },
     { k: 'target', l: 'Target', v: g.target, type: 'number' },
   ], f => api('/api/manager/goal', { id, ...f }));
+};
+// Import dialog: paste or upload last year's numbers, pick how dates map onto this year, preview, import.
+let schedTimer = null;
+window.importSchedule = templateId => {
+  const tpls = mgr.goal_templates.filter(t => t.active);
+  if (!tpls.length) return alert('Add a recurring goal first (e.g. "Revenue", dollars), then import its schedule.');
+  const has = id => mgr.goal_schedule.some(s => s.template_id === id);
+  $modal.innerHTML = `<div class="modal-back" onclick="if(event.target===this)closeModal()"><div class="modal" style="max-width:640px">
+    <h3>Import daily targets</h3>
+    <p class="sub">Paste or upload last year's numbers — one date and one amount per line (a POS or spreadsheet export works as-is; header and total lines are skipped).</p>
+    <label>Which goal</label>
+    <select class="inline" id="sc_tpl" onchange="schedPreview()">${tpls.map(t => `<option value="${t.id}" ${t.id === templateId ? 'selected' : ''}>${esc(t.label)} (${t.unit})</option>`).join('')}</select>
+    <label>Last year's numbers</label>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+      <input type="file" id="sc_file" accept=".csv,.txt,.tsv,text/csv,text/plain" style="display:none" onchange="schedFile(this)">
+      <button type="button" class="small ghost" onclick="document.getElementById('sc_file').click()">Upload CSV…</button><span class="mini">or paste below</span>
+    </div>
+    <textarea class="inline" id="sc_text" style="min-height:120px;font-family:ui-monospace,Menlo,monospace;font-size:13px" placeholder="9/17/2025, $1,450.00&#10;9/18/2025, $1,210.50&#10;…" oninput="schedPreviewSoon()"></textarea>
+    <label>Those dates are…</label>
+    <select class="inline" id="sc_shift" onchange="schedPreview()">
+      <option value="year">last year's — use the same calendar date this year (+1 year)</option>
+      <option value="52w">last year's — use the same weekday this year (+52 weeks)</option>
+      <option value="none">already this year's dates — use as-is</option>
+    </select>
+    <label>Goal = last year's number plus</label>
+    <div style="display:flex;gap:8px;align-items:center"><input class="inline" id="sc_uplift" type="number" step="0.5" value="5" style="max-width:120px" oninput="schedPreviewSoon()"><b>%</b><span class="mini">(0 = match last year, negative to aim lower)</span></div>
+    <label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:13px;color:var(--ink)"><input type="checkbox" id="sc_replace" ${has(Number(templateId)) ? 'checked' : ''}> Replace this goal's existing imported dates (unchecked = add / update only the dates in this file)</label>
+    <div id="sc_preview" class="notice" style="margin-top:12px">Paste or upload to see a preview.</div>
+    <div class="err" id="sc_err"></div>
+    <div class="row"><button class="small ghost" onclick="closeModal()">Cancel</button><button class="small green" id="sc_go" onclick="schedImport()" disabled>Import</button></div>
+  </div></div>`;
+};
+window.schedFile = input => {
+  const f = input.files && input.files[0]; if (!f) return;
+  const r = new FileReader(); r.onload = () => { document.getElementById('sc_text').value = r.result; schedPreview(); }; r.readAsText(f);
+  input.value = '';
+};
+window.schedPreviewSoon = () => { clearTimeout(schedTimer); schedTimer = setTimeout(schedPreview, 400); };
+function schedBody(extra) {
+  return { template_id: Number(document.getElementById('sc_tpl').value), text: document.getElementById('sc_text').value,
+    shift: document.getElementById('sc_shift').value, uplift: Number(document.getElementById('sc_uplift').value) || 0,
+    replace: document.getElementById('sc_replace').checked, ...extra };
+}
+window.schedPreview = async () => {
+  const pv = document.getElementById('sc_preview'), go = document.getElementById('sc_go');
+  if (!pv) return;
+  if (!document.getElementById('sc_text').value.trim()) { pv.textContent = 'Paste or upload to see a preview.'; go.disabled = true; return; }
+  const out = await api('/api/manager/goal-schedule', schedBody({ dry_run: true }));
+  if (out.error) { pv.textContent = out.error; go.disabled = true; return; }
+  const s = out.summary, unit = (mgr.goal_templates.find(t => t.id === Number(document.getElementById('sc_tpl').value)) || {}).unit;
+  pv.innerHTML = `<b>${s.rows} day${s.rows === 1 ? '' : 's'}</b> from ${esc(fmtShort(s.from))} to ${esc(fmtShort(s.to))}${s.skipped ? ` · ${s.skipped} line${s.skipped === 1 ? '' : 's'} skipped` : ''}${s.past ? ` · ${s.past} in the past (kept for the record, not shown as goals)` : ''}.
+    ${s.sample.length ? '<br>' + s.sample.map(r => `${esc(fmtShort(r.date))}: LY ${esc(fmtAmt(r.baseline, unit))} → goal <b>${esc(fmtAmt(r.target, unit))}</b>`).join(' · ') : ''}`;
+  go.disabled = false;
+};
+window.schedImport = async () => {
+  const go = document.getElementById('sc_go'); go.disabled = true;
+  const out = await api('/api/manager/goal-schedule', schedBody({}));
+  if (out.error) { document.getElementById('sc_err').textContent = out.error; go.disabled = false; return; }
+  closeModal(); await reloadMgr();
+};
+window.clearSchedule = async templateId => {
+  if (!confirm('Remove every imported target for this goal? Days go back to the goal\'s normal daily target.')) return;
+  await api('/api/manager/goal-schedule', { template_id: templateId, clear: true }); reloadMgr();
 };
 window.delGoalDay = async id => { if (confirm('Remove this goal from the day (and anything logged toward it)?')) { await api('/api/manager/goal', { id, remove: true }); reloadMgr(); } };
 

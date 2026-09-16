@@ -77,6 +77,91 @@ const HELP_TEXT = 'Board commands — start your text with one:\n' +
   'ANNOUNCE <message>\nTASK <message> (today)\nDAILY <message>\nWEEKLY [Mon..Sun] <message>\n' +
   'GOAL <name> <number> (e.g. GOAL memberships 5)\nNo keyword = announcement. Attach a photo to include it.';
 
+// ---------- goal schedule import ----------
+// Turns pasted/uploaded text (CSV from a POS export, a spreadsheet, or just
+// "9/17/2025  $1,450" lines) into [{date, amount}]. Each line needs one
+// date-looking cell and a number after it; other lines (headers, totals) are
+// skipped and counted.
+function parseDateCell(s) {
+  s = String(s || '').trim().replace(/^["']|["']$/g, '').replace(/\s+/g, ' ');
+  let m;
+  if ((m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/))) return mkDate(+m[1], +m[2], +m[3]);
+  if ((m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/))) return mkDate(m[3].length === 2 ? 2000 + +m[3] : +m[3], +m[1], +m[2]);
+  if ((m = s.match(/^([A-Za-z]{3,9})\.? (\d{1,2}),? (\d{4})$/)) || (m = s.match(/^(\d{1,2})[ -]([A-Za-z]{3,9})[ -](\d{4})$/))) {
+    const [mon, day, year] = /^[A-Za-z]/.test(s) ? [m[1], m[2], m[3]] : [m[2], m[1], m[3]];
+    const mi = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'].indexOf(mon.slice(0, 3).toLowerCase());
+    if (mi >= 0) return mkDate(+year, mi + 1, +day);
+  }
+  return null;
+}
+function mkDate(y, m, d) {
+  if (y < 2000 || y > 2100 || m < 1 || m > 12 || d < 1 || d > 31) return null;
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d ? dt.toISOString().slice(0, 10) : null;
+}
+function parseAmountCell(s) {
+  s = String(s || '').trim().replace(/^["']|["']$/g, '');
+  const neg = /^\(.*\)$/.test(s);
+  const n = Number(s.replace(/[()$,\s]/g, ''));
+  return s !== '' && Number.isFinite(n) ? (neg ? -n : n) : null;
+}
+function splitCells(line) {
+  const cells = []; let cur = '', inQ = false;
+  for (const ch of line) {
+    if (ch === '"') inQ = !inQ;
+    else if (!inQ && (ch === ',' || ch === '\t' || ch === ';' || ch === '|')) { cells.push(cur); cur = ''; }
+    else cur += ch;
+  }
+  cells.push(cur);
+  // Columns pasted from a spreadsheet or a fixed-width report are separated by
+  // runs of spaces; a lone "9/17/2025 1450" line splits before its number.
+  let parts = cells.flatMap(c => c.trim().split(/\s{2,}/));
+  if (parts.length === 1) parts = line.trim().split(/\s+(?=[$(\d])/);
+  // an unquoted "$5,000" was cut at its own comma — glue thousands groups back together
+  const out = [];
+  for (const c of parts) {
+    const prev = out[out.length - 1];
+    if (prev != null && /^\(?-?\$?\d{1,3}(,\d{3})*$/.test(prev.trim()) && /^\d{3}(\.\d+)?\)?$/.test(c.trim())) out[out.length - 1] = prev.trim() + ',' + c.trim();
+    else out.push(c);
+  }
+  return out;
+}
+function parseSchedule(text) {
+  const rows = [], seen = new Map(); let skipped = 0;
+  for (const raw of String(text || '').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const cells = splitCells(line);
+    let date = null, amount = null;
+    for (let i = 0; i < cells.length && amount == null; i++) {
+      if (!date) {
+        // "Sep 19, 2025" / "Sep 19 2025" can arrive split across two or three cells
+        for (let span = 1; span <= 3 && i + span <= cells.length; span++) {
+          date = parseDateCell(cells.slice(i, i + span).join(' '));
+          if (date) { i += span - 1; break; }
+        }
+        continue;
+      }
+      amount = parseAmountCell(cells[i]);
+    }
+    if (!date || amount == null) { skipped++; continue; }
+    if (seen.has(date)) rows[seen.get(date)].amount = amount; // a later duplicate wins
+    else { seen.set(date, rows.length); rows.push({ date, amount }); }
+  }
+  rows.sort((a, b) => a.date < b.date ? -1 : 1);
+  return { rows, skipped };
+}
+// Move last year's dates onto this year: same calendar date (+1 year, Feb 29 -> Feb 28)
+// or the same weekday (+52 weeks), or leave them alone.
+function shiftDate(dateStr, mode) {
+  if (mode === '52w') return addDays(dateStr, 364);
+  if (mode === 'year') {
+    const [y, m, d] = dateStr.split('-').map(Number);
+    return mkDate(y + 1, m, d) || mkDate(y + 1, m, d - 1);
+  }
+  return dateStr;
+}
+
 // Phone numbers compare by their last 10 digits ("(208) 555-0100", "+12085550100", "208.555.0100" all match).
 function phoneKey(s) { const d = String(s || '').replace(/\D/g, ''); return d.length > 10 ? d.slice(-10) : d; }
 
@@ -102,9 +187,13 @@ function mount(app, deps) {
   // invent history for a past day that had no goals).
   async function materializeGoals(date, todayStr) {
     if (date < todayStr) return;
-    for (const t of await q('SELECT * FROM goal_templates WHERE active = 1 ORDER BY sort, id'))
-      await q(`INSERT INTO goals (date, template_id, label, unit, target, sort, source) VALUES ($1,$2,$3,$4,$5,$6,'template')
-        ON CONFLICT (date, template_id) WHERE template_id IS NOT NULL DO NOTHING`, [date, t.id, t.label, t.unit, t.target, t.sort]);
+    const sched = await q('SELECT template_id, target, baseline FROM goal_schedule WHERE date = $1', [date]);
+    for (const t of await q('SELECT * FROM goal_templates WHERE active = 1 ORDER BY sort, id')) {
+      const s = sched.find(x => x.template_id === t.id);
+      await q(`INSERT INTO goals (date, template_id, label, unit, target, baseline, sort, source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        ON CONFLICT (date, template_id) WHERE template_id IS NOT NULL DO NOTHING`,
+        [date, t.id, t.label, t.unit, s ? s.target : t.target, s ? s.baseline : null, t.sort, s ? 'schedule' : 'template']);
+    }
   }
 
   async function boardData(date) {
@@ -147,7 +236,7 @@ function mount(app, deps) {
       ...brand,
       sms_number: settings.sms_number || '', board_pass_set: !!(settings.board_pass || '').trim(),
       staff: staff.map(s => ({ id: s.id, name: s.name, role: s.role, has_pin: !!s.pin })),
-      goals: goals.map(g => ({ id: g.id, label: g.label, unit: g.unit, target: Number(g.target),
+      goals: goals.map(g => ({ id: g.id, label: g.label, unit: g.unit, target: Number(g.target), baseline: g.baseline == null ? null : Number(g.baseline),
         actual: (byGoal[g.id] || []).reduce((s, e) => s + e.amount, 0), entries: byGoal[g.id] || [] })),
       tasks_today, tasks_week,
       announcements: anns.map(a => ({ id: a.id, title: a.title, body: a.body, media_url: a.media_url, pinned: !!a.pinned,
@@ -249,10 +338,12 @@ function mount(app, deps) {
   // ---------- manager panel ----------
   app.get('/api/manager/overview', managerOnly, wrap(async (req, res) => {
     const todayStr = await today();
-    const [staff, goal_templates, goals, tasks, announcements, sms_log, completions, entries] = await Promise.all([
+    const [staff, goal_templates, goals, goal_schedule, tasks, announcements, sms_log, completions, entries] = await Promise.all([
       q('SELECT id, name, phone, role, active, created_at, (pin <> \'\') AS has_pin FROM staff ORDER BY active DESC, name'),
       q('SELECT * FROM goal_templates ORDER BY active DESC, sort, id'),
       q('SELECT * FROM goals WHERE date >= $1 ORDER BY date, sort, id', [addDays(todayStr, -1)]),
+      q(`SELECT template_id, COUNT(*)::int AS days, MIN(date) AS from_date, MAX(date) AS to_date,
+           COUNT(*) FILTER (WHERE date >= $1)::int AS days_ahead FROM goal_schedule GROUP BY template_id`, [todayStr]),
       q(`SELECT * FROM tasks WHERE active = 1 OR created_at > now() - interval '30 days' ORDER BY active DESC, kind, sort, id`),
       q(`SELECT * FROM announcements WHERE active = 1 OR created_at > now() - interval '30 days' ORDER BY active DESC, pinned DESC, id DESC`),
       q('SELECT * FROM sms_log ORDER BY id DESC LIMIT 100'),
@@ -267,8 +358,8 @@ function mount(app, deps) {
     res.json({
       today: todayStr, staff,
       goal_templates: goal_templates.map(t => ({ ...t, target: Number(t.target) })),
-      goals: goals.map(g => ({ ...g, target: Number(g.target) })),
-      tasks, announcements, sms_log, completions, goal_entries: entries,
+      goals: goals.map(g => ({ ...g, target: Number(g.target), baseline: g.baseline == null ? null : Number(g.baseline) })),
+      goal_schedule, tasks, announcements, sms_log, completions, goal_entries: entries,
       branding: await db.branding(),
       settings: {
         timezone: s.timezone || '',
@@ -317,6 +408,42 @@ function mount(app, deps) {
       [todayStr, id, label, unit, target, sort]);
     else await q('DELETE FROM goals WHERE template_id = $1 AND date >= $2 AND NOT EXISTS (SELECT 1 FROM goal_entries e WHERE e.goal_id = goals.id)', [id, todayStr]);
     res.json({ ok: true, id });
+  }));
+
+  // Import a per-day target schedule for a recurring goal — typically last year's
+  // daily numbers, shifted onto this year and bumped by a percentage. dry_run
+  // returns what would be imported without writing anything.
+  app.post('/api/manager/goal-schedule', managerOnly, wrap(async (req, res) => {
+    const b = req.body || {};
+    const tpl = Number.isInteger(Number(b.template_id)) && Number(b.template_id) > 0 ? await one('SELECT * FROM goal_templates WHERE id = $1', [Number(b.template_id)]) : null;
+    if (!tpl) return res.status(400).json({ error: 'Pick which goal this schedule is for.' });
+    const todayStr = await today();
+    if (b.clear) {
+      await q('DELETE FROM goal_schedule WHERE template_id = $1', [tpl.id]);
+      await q('UPDATE goals SET target = $2, baseline = NULL, source = $3 WHERE template_id = $1 AND date >= $4 AND source = $5',
+        [tpl.id, tpl.target, 'template', todayStr, 'schedule']);
+      return res.json({ ok: true });
+    }
+    const text = String(b.text || '');
+    if (text.length > 2_000_000) return res.status(400).json({ error: 'That file is too large — trim it to the dates you need.' });
+    const shift = ['none', 'year', '52w'].includes(b.shift) ? b.shift : 'none';
+    const uplift = Math.max(-100, Math.min(1000, num(b.uplift)));
+    const { rows, skipped } = parseSchedule(text);
+    const out = rows.map(r => ({ date: shiftDate(r.date, shift), baseline: r.amount, target: Math.round(r.amount * (1 + uplift / 100) * 100) / 100 }))
+      .filter(r => r.date && r.target >= 0);
+    const past = out.filter(r => r.date < todayStr).length;
+    const summary = { rows: out.length, skipped, past, from: out[0]?.date || null, to: out[out.length - 1]?.date || null,
+      sample: out.filter(r => r.date >= todayStr).slice(0, 3) };
+    if (!out.length) return res.status(400).json({ error: 'No date + amount pairs found. Each line needs a date (like 9/17/2025 or 2025-09-17) followed by a number.', summary });
+    if (b.dry_run) return res.json({ ok: true, summary });
+    if (b.replace) await q('DELETE FROM goal_schedule WHERE template_id = $1', [tpl.id]);
+    for (const r of out)
+      await q(`INSERT INTO goal_schedule (template_id, date, target, baseline) VALUES ($1,$2,$3,$4)
+        ON CONFLICT (template_id, date) DO UPDATE SET target = EXCLUDED.target, baseline = EXCLUDED.baseline`, [tpl.id, r.date, r.target, r.baseline]);
+    // Days already on the board (today onward) pick up their scheduled numbers now.
+    await q(`UPDATE goals g SET target = s.target, baseline = s.baseline, source = 'schedule'
+      FROM goal_schedule s WHERE s.template_id = g.template_id AND s.date = g.date AND g.template_id = $1 AND g.date >= $2`, [tpl.id, todayStr]);
+    res.json({ ok: true, summary });
   }));
 
   // A goal for one specific day (or a per-day override of a template's target).
@@ -516,6 +643,8 @@ function mount(app, deps) {
 
 module.exports = mount;
 module.exports.parseSms = parseSms;
+module.exports.parseSchedule = parseSchedule;
+module.exports.shiftDate = shiftDate;
 module.exports.phoneKey = phoneKey;
 module.exports.weekStart = weekStart;
 module.exports.twilioSignatureValid = twilioSignatureValid;
