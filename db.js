@@ -197,6 +197,7 @@ async function ensureDefaults() {
   await setDefault('board_pass', '');         // blank = only managers can open the board
   await setDefault('sms_number', '');
   await setDefault('sms_default_kind', 'announcement');
+  await setDefault('sms_reply', '1');            // text a confirmation back to the manager (off = inbound-only, no carrier registration needed)
   await setDefault('token_secret', crypto.randomBytes(32).toString('hex')); // signs login tokens
 }
 

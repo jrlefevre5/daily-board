@@ -683,6 +683,7 @@ function mgrSms() {
       <li>In Twilio: Phone Numbers → your number → Messaging → <i>A message comes in</i> → Webhook, <b>HTTP POST</b>:<br><code class="url">${esc(url)}</code></li>
       <li>On the server, set <code>TWILIO_AUTH_TOKEN</code> (Twilio Console → Account Info) so only real Twilio posts are accepted.
         ${s.sms_secured ? '<span class="chip sms">Secured</span>' : '<span class="chip due">Not set yet</span>'}</li>
+      <li>Replies: ${s.sms_reply ? 'the board texts "Posted ✓" back — a US number must be A2P-registered (local) or verified (toll-free) in Twilio for those to deliver.' : '<b>off</b> — the board posts silently; nothing to register.'} Change under Settings.</li>
       <li>Under Staff, give each manager the Manager role and their mobile number. Texts from any other number are ignored (they show below as rejected).</li>
       <li>Save the number under Settings so the board can show it to everyone.</li>
     </ol>
@@ -747,6 +748,11 @@ function mgrSettings() {
       <option value="announcement" ${s.sms_default_kind !== 'task' ? 'selected' : ''}>An announcement</option>
       <option value="task" ${s.sms_default_kind === 'task' ? 'selected' : ''}>A task on today's list</option>
     </select>
+    <label for="st_reply">Text a confirmation back to the manager</label>
+    <select class="inline" id="st_reply" style="width:100%">
+      <option value="1" ${s.sms_reply ? 'selected' : ''}>Yes — reply "Posted ✓" (US numbers need Twilio's A2P/toll-free registration to send)</option>
+      <option value="0" ${!s.sms_reply ? 'selected' : ''}>No — inbound only (no registration needed; the Text-in tab still logs every text)</option>
+    </select>
     <div class="err" id="st_err" style="color:var(--red);font-size:13px;margin-top:10px;min-height:1em"></div>
     <div style="margin-top:8px"><button class="small green" onclick="saveSettings()">Save settings</button> <span class="mini" id="st_ok"></span></div>
   </div>`;
@@ -754,7 +760,7 @@ function mgrSettings() {
 window.saveSettings = async () => {
   const g = id => document.getElementById(id).value.trim();
   const out = await api('/api/manager/settings', {
-    timezone: g('st_tz'), board_pass: g('st_pass'), manager_pin: g('st_pin'), sms_number: g('st_num'), sms_default_kind: g('st_kind'),
+    timezone: g('st_tz'), board_pass: g('st_pass'), manager_pin: g('st_pin'), sms_number: g('st_num'), sms_default_kind: g('st_kind'), sms_reply: g('st_reply'),
   });
   if (out.error) { document.getElementById('st_err').textContent = out.error; return; }
   if (out.token) { mgrToken = out.token; sessionStorage.setItem('db_mgr_token', mgrToken); }

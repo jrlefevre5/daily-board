@@ -89,6 +89,10 @@ you prefer (Settings).
    so only requests Twilio signed are accepted.
 4. Under Staff, give each manager the Manager role and their mobile number.
 
+Replies ("Posted ✓") can be switched off under Settings — then the number is
+inbound-only, which needs no A2P/toll-free registration in Twilio; the Text-in
+tab still logs every text and what became of it.
+
 Any provider that can POST `from` + `body` (form or JSON) to that URL works
 too — set `SMS_WEBHOOK_SECRET` and have it send the value as an
 `X-Webhook-Secret` header.

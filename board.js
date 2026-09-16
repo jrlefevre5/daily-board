@@ -364,7 +364,7 @@ function mount(app, deps) {
       settings: {
         timezone: s.timezone || '',
         board_pass: s.board_pass || '', manager_pin: s.manager_pin || '',
-        sms_number: s.sms_number || '', sms_default_kind: s.sms_default_kind || 'announcement',
+        sms_number: s.sms_number || '', sms_default_kind: s.sms_default_kind || 'announcement', sms_reply: s.sms_reply !== '0',
         sms_secured: !!(process.env.TWILIO_AUTH_TOKEN || process.env.SMS_WEBHOOK_SECRET),
       },
     });
@@ -563,6 +563,7 @@ function mount(app, deps) {
     }
     if (b.sms_number != null) out.sms_number = clean(b.sms_number, 40);
     if (b.sms_default_kind != null) out.sms_default_kind = b.sms_default_kind === 'task' ? 'task' : 'announcement';
+    if (b.sms_reply != null) out.sms_reply = isOff(b.sms_reply) ? '0' : '1';
     for (const [k, v] of Object.entries(out)) await db.setSetting(k, v);
     // A changed PIN invalidates the caller's own token — hand back a fresh one.
     res.json({ ok: true, token: out.manager_pin != null ? await makeToken('manager') : undefined });
@@ -578,8 +579,12 @@ function mount(app, deps) {
     const from = String(b.From || b.from || b.sender || '').trim();
     const text = String(b.Body ?? b.body ?? b.text ?? b.message ?? '').trim();
     const media = String(b.MediaUrl0 || b.media_url || '').trim();
+    // With replies switched off (Settings) the board still posts everything and logs
+    // what it would have said, but sends nothing back — inbound-only numbers need
+    // no A2P registration.
+    const wantReply = await db.getSetting('sms_reply', '1') !== '0';
     const reply = (msg, status = 200) => {
-      if (isTwilio) return res.status(status).type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response>${msg ? `<Message>${xmlEsc(msg)}</Message>` : ''}</Response>`);
+      if (isTwilio) return res.status(status).type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response>${msg && wantReply ? `<Message>${xmlEsc(msg)}</Message>` : ''}</Response>`);
       res.status(status).json(msg ? { ok: status < 400, reply: msg } : { ok: status < 400 });
     };
 
