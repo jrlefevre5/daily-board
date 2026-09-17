@@ -46,10 +46,10 @@ function parseSms(raw, defaultKind = 'announcement') {
   if (['task', 'todo', 'do'].includes(word)) {
     const sub = rest.match(/^(daily|weekly)\b\s*[:\-]?\s*(.*)$/i);
     if (sub) return parseSms(`${sub[1]} ${sub[2]}`, defaultKind);
-    return rest ? { action: 'task', kind: 'once', text: rest } : { action: 'error', text: 'Nothing to post after TASK.' };
+    return rest ? taskCmd('once', rest) : { action: 'error', text: 'Nothing to post after TASK.' };
   }
   if (['daily', 'everyday'].includes(word))
-    return rest ? { action: 'task', kind: 'daily', text: rest } : { action: 'error', text: 'Nothing to post after DAILY.' };
+    return rest ? taskCmd('daily', rest) : { action: 'error', text: 'Nothing to post after DAILY.' };
   if (['weekly', 'week'].includes(word)) {
     const dm = rest.match(/^([a-z]+)\b\s*[:\-]?\s*(.*)$/i);
     let dow = null, text = rest;
@@ -57,7 +57,7 @@ function parseSms(raw, defaultKind = 'announcement') {
       const i = DOW_MATCH.findIndex(rx => rx.test(dm[1].toLowerCase()));
       if (i >= 0 && dm[1].length >= 3) { dow = i; text = dm[2].trim(); }
     }
-    return text ? { action: 'task', kind: 'weekly', dow, text } : { action: 'error', text: 'Nothing to post after WEEKLY.' };
+    return text ? taskCmd('weekly', text, { dow }) : { action: 'error', text: 'Nothing to post after WEEKLY.' };
   }
   if (['goal', 'target'].includes(word)) {
     const nm = rest.match(/(\$)?\s*(\d[\d,]*(?:\.\d+)?)\s*(\$|dollars?|bucks)?/i);
@@ -70,11 +70,20 @@ function parseSms(raw, defaultKind = 'announcement') {
     return { action: 'goal', label, target, unit };
   }
   // No keyword: the whole message goes wherever the board is set to default.
-  return defaultKind === 'task' ? { action: 'task', kind: 'once', text: s } : { action: 'announcement', text: s };
+  return defaultKind === 'task' ? taskCmd('once', s) : { action: 'announcement', text: s };
 }
+// "TASK ALL count your drawer" -> everyone signs separately; "TASK @Sam call the vendor" -> just Sam.
+function taskCmd(kind, text, extra = {}) {
+  let m;
+  if ((m = text.match(/^(?:all|everyone|everybody)\b\s*[:\-]?\s*(.+)$/i))) return { action: 'task', kind, ...extra, text: m[1].trim(), assign: 'all' };
+  if ((m = text.match(/^@([A-Za-z][\w.'-]*)\s*[:\-]?\s*(.+)$/))) return { action: 'task', kind, ...extra, text: m[2].trim(), mention: m[1] };
+  return { action: 'task', kind, ...extra, text };
+}
+function parseIds(json) { try { const a = JSON.parse(json || '[]'); return Array.isArray(a) ? a.map(Number).filter(n => Number.isInteger(n) && n > 0) : []; } catch { return []; } }
 
 const HELP_TEXT = 'Board commands — start your text with one:\n' +
   'ANNOUNCE <message>\nTASK <message> (today)\nDAILY <message>\nWEEKLY [Mon..Sun] <message>\n' +
+  'Add ALL for everyone-signs (TASK ALL …) or @Name for one person (TASK @Sam …)\n' +
   'GOAL <name> <number> (e.g. GOAL memberships 5)\nNo keyword = announcement. Attach a photo to include it.';
 
 // ---------- goal schedule import ----------
@@ -175,8 +184,55 @@ function twilioSignatureValid(token, url, params, header) {
   return got.length === want.length && crypto.timingSafeEqual(Buffer.from(got), Buffer.from(want));
 }
 
+// ---------- outbound texts (Twilio REST) ----------
+// Needs TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN + TWILIO_FROM (the board's number).
+// Best-effort: a failure is logged, never thrown at the caller.
+function smsOutboundReady() { return !!(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM); }
+async function sendSms(to, body) {
+  if (!smsOutboundReady()) return { ok: false, error: 'outbound not configured' };
+  const sid = process.env.TWILIO_ACCOUNT_SID, token = process.env.TWILIO_AUTH_TOKEN;
+  const base = process.env.TWILIO_API_BASE || 'https://api.twilio.com';
+  try {
+    const r = await fetch(`${base}/2010-04-01/Accounts/${sid}/Messages.json`, {
+      method: 'POST',
+      headers: { Authorization: 'Basic ' + Buffer.from(`${sid}:${token}`).toString('base64'), 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ To: to, From: process.env.TWILIO_FROM, Body: body }).toString(),
+    });
+    const j = await r.json().catch(() => ({}));
+    return r.ok ? { ok: true, sid: j.sid } : { ok: false, error: j.message || `HTTP ${r.status}` };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+// US-centric normalisation: 10 digits -> +1XXXXXXXXXX; anything already in +E.164 form passes through.
+function e164(phone) {
+  const d = String(phone || '').replace(/\D/g, '');
+  if (!d) return '';
+  if (String(phone).trim().startsWith('+')) return '+' + d;
+  return d.length === 10 ? '+1' + d : d.length === 11 && d.startsWith('1') ? '+' + d : '+' + d;
+}
+
 function mount(app, deps) {
   const { q, one, db, wrap, boardAuth, managerOnly, makeToken, safeEqual, recordFail, clientIp, baseUrl } = deps;
+
+  // Text everyone a new per-person task applies to (skipping whoever created it by text).
+  async function notifyTask(task, assignees, skipPhoneKey = '') {
+    if (!smsOutboundReady() || await db.getSetting('sms_notify', '1') === '0') return { sent: 0 };
+    const people = assignees.length
+      ? await q("SELECT id, name, phone FROM staff WHERE active = 1 AND phone <> '' AND id = ANY($1::int[])", [assignees])
+      : await q("SELECT id, name, phone FROM staff WHERE active = 1 AND phone <> ''");
+    const biz = await db.getSetting('business_name', 'Daily Board');
+    const when = task.kind === 'daily' ? ' (every day)' : task.kind === 'weekly' ? ` (weekly${task.day_of_week != null ? ', due ' + DOW_SHORT[task.day_of_week] : ''})` : '';
+    const body = `${biz}: new task for you — "${task.title}"${when}. Sign it off on the board when it's done.`;
+    let sent = 0;
+    for (const p of people) {
+      if (skipPhoneKey && phoneKey(p.phone) === skipPhoneKey) continue;
+      const to = e164(p.phone);
+      const r = await sendSms(to, body);
+      await q('INSERT INTO sms_log (from_phone, staff_name, body, media_url, action, target_id, reply) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+        [to, p.name, body, '', r.ok ? 'sent' : 'send-failed', task.id, r.ok ? `Twilio ${r.sid}` : r.error]);
+      if (r.ok) sent++;
+    }
+    return { sent };
+  }
 
   const today = async () => localToday(await db.getSetting('timezone', 'UTC'));
   const num = v => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
@@ -218,16 +274,23 @@ function mount(app, deps) {
     const byGoal = {};
     for (const e of entries) (byGoal[e.goal_id] = byGoal[e.goal_id] || []).push({ ...e, amount: Number(e.amount) });
     const doneBy = {};
-    for (const c of completions) doneBy[`${c.task_id}|${c.period}`] = c;
-    const pubDone = c => c ? { id: c.id, staff_id: c.staff_id, staff_name: c.staff_name, signed_at: c.signed_at,
-      signature: c.signature, signature_kind: c.signature_kind, note: c.note } : null;
+    for (const c of completions) (doneBy[`${c.task_id}|${c.period}`] = doneBy[`${c.task_id}|${c.period}`] || []).push(c);
+    const pubDone = c => ({ id: c.id, staff_id: c.staff_id, staff_name: c.staff_name, signed_at: c.signed_at,
+      signature: c.signature, signature_kind: c.signature_kind, note: c.note });
+    const activeIds = staff.map(s => s.id);
     const ackBy = {};
     for (const a of acks) (ackBy[a.announcement_id] = ackBy[a.announcement_id] || []).push({ staff_name: a.staff_name, signed_at: a.signed_at });
     const tasks_today = [], tasks_week = [];
     for (const t of tasks) {
       const period = t.kind === 'weekly' ? ws : date;
+      const comps = (doneBy[`${t.id}|${period}`] || []).map(pubDone);
+      const assignees = parseIds(t.assignees);
+      const each = t.assign === 'each';
+      const required = each ? (assignees.length ? assignees.filter(id => activeIds.includes(id)) : activeIds) : null;
       const row = { id: t.id, kind: t.kind, title: t.title, detail: t.detail, day_of_week: t.day_of_week, due_date: t.due_date,
-        source: t.source, created_by: t.created_by, period, completion: pubDone(doneBy[`${t.id}|${period}`]) };
+        source: t.source, created_by: t.created_by, period, assign: each ? 'each' : 'anyone', assignees, required,
+        completions: comps, completion: each ? null : (comps[0] || null),
+        done: each ? required.length > 0 && required.every(id => comps.some(c => c.staff_id === id)) : comps.length > 0 };
       if (t.kind === 'weekly') { row.due_today = t.day_of_week === dow; tasks_week.push(row); }
       else tasks_today.push(row);
     }
@@ -290,14 +353,28 @@ function mount(app, deps) {
       const t = await one('SELECT * FROM tasks WHERE id = $1 AND active = 1', [id]);
       if (!t) return res.status(404).json({ error: 'That task is no longer on the board.' });
       const period = t.kind === 'weekly' ? weekStart(date) : t.kind === 'once' ? t.due_date : date;
-      try {
-        const row = await one(`INSERT INTO task_completions (task_id, period, staff_id, staff_name, signature, signature_kind, note, signed_ip)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, signed_at`, [t.id, period, who.staff_id, who.staff_name, sig.signature, sig.signature_kind, note, ip]);
-        return res.json({ ok: true, completion: { id: row.id, ...who, ...sig, note, signed_at: row.signed_at } });
-      } catch (e) {
-        if (e.code === '23505') return res.status(409).json({ error: 'Someone already signed this off — refresh the board.' });
-        throw e;
+      const vals = [t.id, period, who.staff_id, who.staff_name, sig.signature, sig.signature_kind, note, ip];
+      if (t.assign === 'each') {
+        // Everyone (or the named people) signs separately; only they can.
+        if (!who.staff_id) return res.status(400).json({ error: 'Pick your name from the list for this task.' });
+        const assignees = parseIds(t.assignees);
+        const required = assignees.length ? assignees : (await q('SELECT id FROM staff WHERE active = 1')).map(s => s.id);
+        if (!required.includes(who.staff_id)) return res.status(403).json({ error: `${who.staff_name} isn't on this task.` });
+        try {
+          const row = await one(`INSERT INTO task_completions (task_id, period, staff_id, staff_name, signature, signature_kind, note, signed_ip)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, signed_at`, vals);
+          return res.json({ ok: true, completion: { id: row.id, ...who, ...sig, note, signed_at: row.signed_at } });
+        } catch (e) {
+          if (e.code === '23505') return res.status(409).json({ error: `${who.staff_name} already signed this off.` });
+          throw e;
+        }
       }
+      // One sign-off for the whole team: insert only if nobody beat us to it.
+      const row = await one(`INSERT INTO task_completions (task_id, period, staff_id, staff_name, signature, signature_kind, note, signed_ip)
+        SELECT $1::int, $2::text, $3::int, $4::text, $5::text, $6::text, $7::text, $8::text
+        WHERE NOT EXISTS (SELECT 1 FROM task_completions WHERE task_id = $1 AND period = $2) RETURNING id, signed_at`, vals);
+      if (!row) return res.status(409).json({ error: 'Someone already signed this off — refresh the board.' });
+      return res.json({ ok: true, completion: { id: row.id, ...who, ...sig, note, signed_at: row.signed_at } });
     }
     if (b.kind === 'announcement') {
       const a = await one('SELECT id FROM announcements WHERE id = $1 AND active = 1', [id]);
@@ -366,6 +443,7 @@ function mount(app, deps) {
         board_pass: s.board_pass || '', manager_pin: s.manager_pin || '',
         sms_number: s.sms_number || '', sms_default_kind: s.sms_default_kind || 'announcement', sms_reply: s.sms_reply !== '0',
         sms_secured: !!(process.env.TWILIO_AUTH_TOKEN || process.env.SMS_WEBHOOK_SECRET),
+        sms_outbound: smsOutboundReady(), sms_notify: (s.sms_notify || '1') !== '0',
       },
     });
   }));
@@ -475,11 +553,24 @@ function mount(app, deps) {
     const dow = kind === 'weekly' && b.day_of_week !== '' && b.day_of_week != null && num(b.day_of_week) >= 0 && num(b.day_of_week) <= 6 ? num(b.day_of_week) : null;
     const due = kind === 'once' ? (isDateStr(b.due_date) ? String(b.due_date) : await today()) : null;
     const by = clean(b.created_by, 80) || 'Manager';
+    const assign = b.assign === 'each' ? 'each' : 'anyone';
+    let assignees = [];
+    if (assign === 'each' && Array.isArray(b.assignees) && b.assignees.length) {
+      const ids = b.assignees.map(Number).filter(n => Number.isInteger(n) && n > 0);
+      assignees = (await q('SELECT id FROM staff WHERE active = 1 AND id = ANY($1::int[])', [ids])).map(s => s.id);
+      if (!assignees.length) return res.status(400).json({ error: 'Pick at least one person, or choose "Everyone".' });
+    }
     let id = Number(b.id) || 0;
-    if (id) await q('UPDATE tasks SET kind=$2, title=$3, detail=$4, day_of_week=$5, due_date=$6, sort=$7, active=$8 WHERE id=$1',
-      [id, kind, title, detail, dow, due, sort, active]);
-    else id = (await one(`INSERT INTO tasks (kind, title, detail, day_of_week, due_date, sort, active, source, created_by)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,'manual',$8) RETURNING id`, [kind, title, detail, dow, due, sort, active, by])).id;
+    if (id) await q('UPDATE tasks SET kind=$2, title=$3, detail=$4, day_of_week=$5, due_date=$6, sort=$7, active=$8, assign=$9, assignees=$10 WHERE id=$1',
+      [id, kind, title, detail, dow, due, sort, active, assign, JSON.stringify(assignees)]);
+    else {
+      id = (await one(`INSERT INTO tasks (kind, title, detail, day_of_week, due_date, sort, active, source, created_by, assign, assignees)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,'manual',$8,$9,$10) RETURNING id`, [kind, title, detail, dow, due, sort, active, by, assign, JSON.stringify(assignees)])).id;
+      if (assign === 'each' && active && !isOff(b.notify)) {
+        const { sent } = await notifyTask({ id, kind, title, day_of_week: dow }, assignees);
+        return res.json({ ok: true, id, notified: sent });
+      }
+    }
     res.json({ ok: true, id });
   }));
 
@@ -564,6 +655,7 @@ function mount(app, deps) {
     if (b.sms_number != null) out.sms_number = clean(b.sms_number, 40);
     if (b.sms_default_kind != null) out.sms_default_kind = b.sms_default_kind === 'task' ? 'task' : 'announcement';
     if (b.sms_reply != null) out.sms_reply = isOff(b.sms_reply) ? '0' : '1';
+    if (b.sms_notify != null) out.sms_notify = isOff(b.sms_notify) ? '0' : '1';
     for (const [k, v] of Object.entries(out)) await db.setSetting(k, v);
     // A changed PIN invalidates the caller's own token — hand back a fresh one.
     res.json({ ok: true, token: out.manager_pin != null ? await makeToken('manager') : undefined });
@@ -627,12 +719,25 @@ function mount(app, deps) {
       action = 'announcement'; targetId = row.id;
       msg = `Posted to announcements ✓${media ? ' (with photo)' : ''}`;
     } else if (cmd.action === 'task') {
-      const row = await one(`INSERT INTO tasks (kind, title, detail, day_of_week, due_date, sort, active, source, created_by)
-        VALUES ($1,$2,$3,$4,$5,0,1,'sms',$6) RETURNING id`,
-        [cmd.kind, cmd.text.slice(0, 200), media ? `Photo: ${media}` : '', cmd.kind === 'weekly' ? cmd.dow : null, cmd.kind === 'once' ? todayStr : null, sender.name]);
+      let assign = 'anyone', assignees = [], whoNote = '';
+      if (cmd.assign === 'all') { assign = 'each'; whoNote = ' — everyone signs'; }
+      else if (cmd.mention) {
+        const name = cmd.mention.toLowerCase();
+        const person = (await q('SELECT id, name FROM staff WHERE active = 1 ORDER BY name'))
+          .find(s => s.name.toLowerCase() === name || s.name.toLowerCase().split(/\s+/)[0] === name || s.name.toLowerCase().replace(/\s+/g, '') === name);
+        if (!person) { const err = `Nobody named "${cmd.mention}" is on the roster — add them under Staff, or leave off the @.`; await log({ staff_name: sender.name, action: 'rejected', reply: err }); return reply(err); }
+        assign = 'each'; assignees = [person.id]; whoNote = ` for ${person.name}`;
+      }
+      const row = await one(`INSERT INTO tasks (kind, title, detail, day_of_week, due_date, sort, active, source, created_by, assign, assignees)
+        VALUES ($1,$2,$3,$4,$5,0,1,'sms',$6,$7,$8) RETURNING id`,
+        [cmd.kind, cmd.text.slice(0, 200), media ? `Photo: ${media}` : '', cmd.kind === 'weekly' ? cmd.dow : null, cmd.kind === 'once' ? todayStr : null, sender.name, assign, JSON.stringify(assignees)]);
       action = `task-${cmd.kind}`; targetId = row.id;
-      msg = cmd.kind === 'once' ? "Added to today's tasks ✓" : cmd.kind === 'daily' ? 'Added as a daily task ✓'
-        : `Added as a weekly task${cmd.dow != null ? ` (due ${DOW_SHORT[cmd.dow]})` : ''} ✓`;
+      msg = (cmd.kind === 'once' ? "Added to today's tasks" : cmd.kind === 'daily' ? 'Added as a daily task'
+        : `Added as a weekly task${cmd.dow != null ? ` (due ${DOW_SHORT[cmd.dow]})` : ''}`) + whoNote + ' ✓';
+      if (assign === 'each') {
+        const { sent } = await notifyTask({ id: row.id, kind: cmd.kind, title: cmd.text.slice(0, 200), day_of_week: cmd.dow ?? null }, assignees, key);
+        if (sent) msg += ` Texted ${sent} ${sent === 1 ? 'person' : 'people'}.`;
+      }
     } else if (cmd.action === 'goal') {
       // Replace today's goal with that name if there is one, otherwise add it.
       const existing = (await q('SELECT * FROM goals WHERE date = $1', [todayStr])).find(g => g.label.toLowerCase() === cmd.label.toLowerCase());

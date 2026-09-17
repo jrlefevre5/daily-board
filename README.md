@@ -41,6 +41,13 @@ refreshes itself every minute).
   Signing off records the person, time, an optional note, a drawn signature
   (PNG) or typed name, and the device address. Undo is limited to the signer
   (with their PIN, if they have one) or a manager.
+  **Who does it:** *Anyone* (one sign-off by whoever did it), *Specific people*
+  (each named person signs separately — one name makes it an individual task),
+  or *Everyone* (the whole active roster signs separately). Per-person tasks
+  show a chip per person that turns green as each signs; the task is done when
+  all have. When outbound texting is configured (`TWILIO_ACCOUNT_SID` +
+  `TWILIO_FROM` alongside the auth token), creating a per-person task texts
+  each person on it.
 - **Announcements** — pin to the top, attach an image, auto-hide after a date;
   each employee can mark one as read so you can see who has seen it.
 - **Prev / Next day** pages through history to see how a day was closed out.
@@ -69,6 +76,8 @@ first word decides where it lands:
 | `TASK Restock the front shelves` | one-time task on today's list |
 | `DAILY Wipe down the counters` | recurring daily task |
 | `WEEKLY Fri Deep-clean the back room` | recurring weekly task (due Friday) |
+| `TASK ALL Read the new return policy` | everyone signs separately |
+| `TASK @Sam Call the vendor back` | assigned to Sam (first name or full name from Staff) |
 | `GOAL units sold 25` / `GOAL revenue $1200` | sets today's target |
 | `HELP` | texts the list back |
 

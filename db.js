@@ -117,6 +117,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   created_by TEXT NOT NULL DEFAULT '',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Who does a task: 'anyone' = one sign-off by whoever did it; 'each' = every
+-- person in assignees (JSON array of staff ids; empty = everyone active) signs
+-- off separately, and the task is done when they all have.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS assign TEXT NOT NULL DEFAULT 'anyone';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS assignees TEXT NOT NULL DEFAULT '[]';
 -- period = the day (daily/once) or the week's Monday (weekly) the sign-off covers.
 CREATE TABLE IF NOT EXISTS task_completions (
   id SERIAL PRIMARY KEY,
@@ -128,9 +133,12 @@ CREATE TABLE IF NOT EXISTS task_completions (
   signature_kind TEXT NOT NULL DEFAULT 'typed',
   note TEXT NOT NULL DEFAULT '',
   signed_ip TEXT NOT NULL DEFAULT '',
-  signed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (task_id, period)
+  signed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- v4: one sign-off per person per period (per-person tasks); 'anyone' tasks
+-- enforce their single sign-off in the API instead of here.
+ALTER TABLE task_completions DROP CONSTRAINT IF EXISTS task_completions_task_id_period_key;
+CREATE UNIQUE INDEX IF NOT EXISTS task_completions_person_idx ON task_completions (task_id, period, LOWER(staff_name));
 CREATE TABLE IF NOT EXISTS announcements (
   id SERIAL PRIMARY KEY,
   title TEXT NOT NULL DEFAULT '',
@@ -178,7 +186,7 @@ END $$;
 `;
 
 // Bump when DDL or defaults change; a mismatch replays the (idempotent) migration.
-const SCHEMA_VERSION = '3';
+const SCHEMA_VERSION = '4';
 
 async function ensureDefaults() {
   const setDefault = (k, v) => q('INSERT INTO settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO NOTHING', [k, v]);
@@ -197,7 +205,8 @@ async function ensureDefaults() {
   await setDefault('board_pass', '');         // blank = only managers can open the board
   await setDefault('sms_number', '');
   await setDefault('sms_default_kind', 'announcement');
-  await setDefault('sms_reply', '1');            // text a confirmation back to the manager (off = inbound-only, no carrier registration needed)
+  await setDefault('sms_reply', '1');
+  await setDefault('sms_notify', '1');           // text people when a per-person task is created for them            // text a confirmation back to the manager (off = inbound-only, no carrier registration needed)
   await setDefault('token_secret', crypto.randomBytes(32).toString('hex')); // signs login tokens
 }
 

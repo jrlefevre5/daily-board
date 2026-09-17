@@ -262,12 +262,21 @@ const annCard = canSign => a => `<div class="ann ${a.pinned ? 'pinned' : ''}">
   </div>
 </div>`;
 
+// Who a task is for, as a chip. Per-person tasks with one name behave like a normal row locked to that person.
+function whoChip(t) {
+  if (t.assign !== 'each') return '';
+  if (!t.assignees.length) return '<span class="chip who">Everyone</span>';
+  if (t.required.length === 1) { const p = data.staff.find(s => s.id === t.required[0]); return `<span class="chip who">${esc(p ? p.name : 'Assigned')}</span>`; }
+  return '<span class="chip who">Each person</span>';
+}
 const taskRow = canSign => t => {
-  const c = t.completion;
+  if (t.assign === 'each' && t.required.length !== 1) return eachRow(canSign, t);
+  const c = t.completion || t.completions[0] || null;
+  const lock = t.assign === 'each' ? t.required[0] : 0;
   return `<div class="task ${c ? 'done' : ''}">
-    <div class="box" ${!c && canSign ? `onclick="openSign('task', ${t.id})" title="Sign off"` : ''}>${c ? '✓' : ''}</div>
+    <div class="box" ${!c && canSign ? `onclick="openSign('task', ${t.id}, ${lock})" title="Sign off"` : ''}>${c ? '✓' : ''}</div>
     <div class="body">
-      <div class="title">${esc(t.title)}
+      <div class="title">${esc(t.title)} ${whoChip(t)}
         ${t.kind === 'weekly' && t.day_of_week != null ? `<span class="chip ${t.due_today ? 'due' : ''}">${t.due_today ? 'Due today' : 'Due ' + DOW_SHORT[t.day_of_week]}</span>` : ''}
         ${t.kind === 'once' ? '<span class="chip">One-time</span>' : ''}
         ${t.source === 'sms' ? '<span class="chip sms">Texted in</span>' : ''}
@@ -279,21 +288,45 @@ const taskRow = canSign => t => {
           ${canSign ? `<button class="mini-btn danger" onclick="unsign(${c.id}, ${c.staff_id || 0}, '${attr(c.staff_name)}')">undo</button>` : ''}
         </div>` : ''}
     </div>
-    ${!c && canSign ? `<div class="act"><button class="small" onclick="openSign('task', ${t.id})">Sign off</button></div>` : ''}
+    ${!c && canSign ? `<div class="act"><button class="small" onclick="openSign('task', ${t.id}, ${lock})">Sign off</button></div>` : ''}
   </div>`;
 };
+// A task everyone (or several named people) must sign separately: one chip per person.
+function eachRow(canSign, t) {
+  const people = t.required.map(id => data.staff.find(s => s.id === id)).filter(Boolean);
+  const n = people.filter(p => t.completions.some(c => c.staff_id === p.id)).length;
+  return `<div class="task each ${t.done ? 'done' : ''}">
+    <div class="box">${t.done ? '✓' : `<small>${n}/${people.length}</small>`}</div>
+    <div class="body">
+      <div class="title">${esc(t.title)} ${whoChip(t)}
+        ${t.kind === 'weekly' && t.day_of_week != null ? `<span class="chip ${t.due_today ? 'due' : ''}">${t.due_today ? 'Due today' : 'Due ' + DOW_SHORT[t.day_of_week]}</span>` : ''}
+        ${t.kind === 'once' ? '<span class="chip">One-time</span>' : ''}
+        ${t.source === 'sms' ? '<span class="chip sms">Texted in</span>' : ''}
+      </div>
+      ${t.detail ? `<div class="detail">${esc(t.detail)}</div>` : ''}
+      <div class="people">
+        ${people.map(p => { const c = t.completions.find(x => x.staff_id === p.id);
+          return c ? `<span class="person done" title="Signed ${attr(fmtStamp(c.signed_at))}">✓ ${esc(p.name)}${canSign ? ` <button class="undo" onclick="unsign(${c.id}, ${p.id}, '${attr(p.name)}')" title="Undo">×</button>` : ''}</span>`
+            : `<button class="person" ${canSign ? `onclick="openSign('task', ${t.id}, ${p.id})"` : 'disabled'}>${esc(p.name)}</button>`; }).join('')}
+        ${!people.length ? '<span class="mini">Nobody on the roster yet — add people under Manager panel → Staff.</span>' : ''}
+      </div>
+    </div>
+  </div>`;
+}
 
 // ---------- sign-off dialog with signature pad ----------
 let padState = null; // { canvas, ctx, drawn, w, h }
 function closeModal() { $modal.innerHTML = ''; padState = null; }
 window.closeModal = closeModal;
 
-function staffPicker(id) {
+function staffPicker(id, allowed, preselect) {
   if (!data.staff.length) return `<label>Your name</label><input class="inline" id="${id}_name" placeholder="Type your name" autocomplete="off">`;
+  const list = allowed ? data.staff.filter(s => allowed.includes(s.id)) : data.staff;
+  const pick = preselect || (list.some(s => s.id === lastStaff) ? lastStaff : 0);
   return `<label>Who's signing?</label>
     <select class="inline" id="${id}_staff" onchange="onStaffPick('${id}')">
       <option value="">Pick your name…</option>
-      ${data.staff.map(s => `<option value="${s.id}" data-pin="${s.has_pin ? 1 : 0}" ${s.id === lastStaff ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}
+      ${list.map(s => `<option value="${s.id}" data-pin="${s.has_pin ? 1 : 0}" ${s.id === pick ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}
     </select>
     <div id="${id}_pinwrap" style="display:none"><label>Your PIN</label><input class="inline" id="${id}_pin" type="password" inputmode="numeric" autocomplete="off" placeholder="4-digit PIN"></div>`;
 }
@@ -312,11 +345,12 @@ function signerFields(id) {
   return out;
 }
 
-window.openSign = (kind, id) => {
-  let title = '', sub = '', extra = '';
+window.openSign = (kind, id, staffId = 0) => {
+  let title = '', sub = '', extra = '', allowed = null;
   if (kind === 'task') {
     const t = [...data.tasks_today, ...data.tasks_week].find(x => x.id === id);
     title = `Sign off: ${t.title}`; sub = t.kind === 'weekly' ? 'Counts for this whole week.' : `For ${fmtDay(viewDate)}.`;
+    if (t.assign === 'each') { const signed = t.completions.map(c => c.staff_id); allowed = t.required.filter(x => !signed.includes(x)); sub += ' Each person signs for themselves.'; }
     extra = `<label>Note (optional)</label><input class="inline" id="sg_note" placeholder="Anything worth noting?" maxlength="500">`;
   } else if (kind === 'announcement') {
     const a = data.announcements.find(x => x.id === id);
@@ -334,7 +368,7 @@ window.openSign = (kind, id) => {
   }
   $modal.innerHTML = `<div class="modal-back" onclick="if(event.target===this)closeModal()"><div class="modal">
     <h3>${esc(title)}</h3><p class="sub">${esc(sub)}</p>
-    ${staffPicker('sg')}
+    ${staffPicker('sg', allowed, staffId)}
     ${extra}
     <label>Signature</label>
     <div id="sg_padwrap">
@@ -602,25 +636,42 @@ function mgrTasks() {
     ${groups.map(([kind, title, note]) => {
       const rows = mgr.tasks.filter(t => t.kind === kind);
       return `<div class="tools" style="margin-top:14px"><b>${title}</b><span class="mini">${note}</span></div>
-      <table class="list"><tr><th>Task</th><th>${kind === 'weekly' ? 'Due' : kind === 'once' ? 'Day' : ''}</th><th>By</th><th></th></tr>
+      <table class="list"><tr><th>Task</th><th>Who</th><th>${kind === 'weekly' ? 'Due' : kind === 'once' ? 'Day' : ''}</th><th>By</th><th></th></tr>
         ${rows.map(t => `<tr class="${t.active ? '' : 'off'}"><td>${esc(t.title)} ${onoff(t.active)}${t.detail ? `<div class="mini">${esc(t.detail)}</div>` : ''}</td>
+          <td class="mini">${esc(whoLabel(t))}</td>
           <td>${kind === 'weekly' ? (t.day_of_week != null ? DOW_SHORT[t.day_of_week] : 'Any day') : kind === 'once' ? esc(fmtShort(t.due_date)) : ''}</td>
           <td class="mini">${esc(t.created_by)}${t.source === 'sms' ? ' <span class="chip sms">text</span>' : ''}</td>
           <td class="acts"><button class="mini-btn" onclick="editTask(${t.id})">Edit</button> <button class="mini-btn danger" onclick="delTask(${t.id})">Delete</button></td></tr>`).join('')
-          || `<tr><td colspan="4" class="empty">None.</td></tr>`}
+          || `<tr><td colspan="5" class="empty">None.</td></tr>`}
       </table>`; }).join('')}`;
 }
+function taskIds(t) { try { return JSON.parse(t.assignees || '[]').map(Number); } catch { return []; } }
+function whoLabel(t) {
+  if (t.assign !== 'each') return 'Anyone';
+  const ids = taskIds(t);
+  if (!ids.length) return 'Everyone (each signs)';
+  return ids.map(id => (mgr.staff.find(s => s.id === id) || {}).name || '?').join(', ');
+}
 window.editTask = id => {
-  const t = mgr.tasks.find(x => x.id === id) || { kind: 'daily', title: '', detail: '', day_of_week: '', due_date: mgr.today, sort: 0, active: 1 };
+  const t = mgr.tasks.find(x => x.id === id) || { kind: 'daily', title: '', detail: '', day_of_week: '', due_date: mgr.today, sort: 0, active: 1, assign: 'anyone', assignees: '[]' };
+  const ids = taskIds(t), who = t.assign === 'each' ? (ids.length ? 'people' : 'everyone') : 'anyone';
+  const roster = mgr.staff.filter(s => s.active);
   formModal(id ? 'Edit task' : 'New task', [
     { k: 'title', l: 'Task', v: t.title, ph: 'e.g. Wipe down the counters' },
     { k: 'detail', l: 'Details (optional)', v: t.detail, type: 'textarea' },
+    { k: 'who', l: 'Who does this?', v: who, type: 'select', opts: [['anyone', 'Anyone on the team — one sign-off'], ['people', 'Specific people — each signs off'], ['everyone', 'Everyone — each person signs off']] },
+    { k: 'assignees', l: 'People (for "specific people")', v: ids.map(String), type: 'checks', opts: roster.map(s => [String(s.id), s.name]), hint: roster.length ? '' : 'Add people under Staff first.' },
+    ...(id ? [] : [{ k: 'notify', l: 'Text them about it', v: '1', type: 'select', opts: [['1', mgr.settings.sms_outbound ? 'Yes — text each person on this task now' : 'Yes (needs outbound texting set up — see Text-in)'], ['0', 'No']] }]),
     { k: 'kind', l: 'Repeats', v: t.kind, type: 'select', opts: [['daily', 'Every day'], ['weekly', 'Once a week'], ['once', 'Just once (one day)']] },
     { k: 'day_of_week', l: 'Weekly: due on', v: t.day_of_week ?? '', type: 'select', opts: [['', 'Any day that week'], ...DOW.map((d, i) => [String(i), d])] },
     { k: 'due_date', l: 'One-time: which day', v: t.due_date || mgr.today, type: 'date' },
     { k: 'sort', l: 'Order', v: t.sort, type: 'number' },
     { k: 'active', l: 'Active', v: t.active ? '1' : '0', type: 'select', opts: [['1', 'Yes'], ['0', 'No — hidden']] },
-  ], f => api('/api/manager/task', { id, ...f, active: f.active === '1', created_by: mgrName }));
+  ], f => {
+    if (f.who === 'people' && !(f.assignees || []).length) return Promise.resolve({ error: 'Tick at least one person, or choose "Everyone".' });
+    return api('/api/manager/task', { id, ...f, assign: f.who === 'anyone' ? 'anyone' : 'each', assignees: f.who === 'people' ? f.assignees : [],
+      notify: f.notify !== '0', active: f.active === '1', created_by: mgrName });
+  });
 };
 window.delTask = async id => { if (confirm('Delete this task and its sign-off history?')) { await api('/api/manager/task', { id, remove: true }); reloadMgr(); } };
 
@@ -683,6 +734,7 @@ function mgrSms() {
       <li>In Twilio: Phone Numbers → your number → Messaging → <i>A message comes in</i> → Webhook, <b>HTTP POST</b>:<br><code class="url">${esc(url)}</code></li>
       <li>On the server, set <code>TWILIO_AUTH_TOKEN</code> (Twilio Console → Account Info) so only real Twilio posts are accepted.
         ${s.sms_secured ? '<span class="chip sms">Secured</span>' : '<span class="chip due">Not set yet</span>'}</li>
+      <li>Texting people about new tasks: ${s.sms_outbound ? '<span class="chip sms">On</span>' : '<span class="chip due">Not set up</span>'} — add <code>TWILIO_ACCOUNT_SID</code> (Console → Account Info) and <code>TWILIO_FROM</code> (this number, e.g. +12085550100) in Vercel and redeploy. Sends need the same registration as replies.</li>
       <li>Replies: ${s.sms_reply ? 'the board texts "Posted ✓" back — a US number must be A2P-registered (local) or verified (toll-free) in Twilio for those to deliver.' : '<b>off</b> — the board posts silently; nothing to register.'} Change under Settings.</li>
       <li>Under Staff, give each manager the Manager role and their mobile number. Texts from any other number are ignored (they show below as rejected).</li>
       <li>Save the number under Settings so the board can show it to everyone.</li>
@@ -695,6 +747,8 @@ WEEKLY Fri  Deep-clean the back room          (repeats weekly, due Friday)
 GOAL      units sold 25                       (sets today's target)
 GOAL      revenue $1200
 HELP                                          (texts back this list)
+TASK ALL  Read the new return policy          (everyone signs separately)
+TASK @Sam Call the vendor back                (just Sam)
 No keyword → ${s.sms_default_kind === 'task' ? "goes on today's tasks" : 'posted as an announcement'}. Attach a photo to include it.</pre>
     <div class="tools" style="margin-top:18px"><b>Recent texts</b><div class="spacer"></div><button class="mini-btn" onclick="reloadMgr()">Refresh</button></div>
     <table class="list"><tr><th>When</th><th>From</th><th>Message</th><th>Result</th></tr>
@@ -748,6 +802,11 @@ function mgrSettings() {
       <option value="announcement" ${s.sms_default_kind !== 'task' ? 'selected' : ''}>An announcement</option>
       <option value="task" ${s.sms_default_kind === 'task' ? 'selected' : ''}>A task on today's list</option>
     </select>
+    <label for="st_notify">Text people when a task is created for them</label>
+    <select class="inline" id="st_notify" style="width:100%">
+      <option value="1" ${s.sms_notify ? 'selected' : ''}>Yes — for "specific people" and "everyone" tasks</option>
+      <option value="0" ${!s.sms_notify ? 'selected' : ''}>No</option>
+    </select>
     <label for="st_reply">Text a confirmation back to the manager</label>
     <select class="inline" id="st_reply" style="width:100%">
       <option value="1" ${s.sms_reply ? 'selected' : ''}>Yes — reply "Posted ✓" (US numbers need Twilio's A2P/toll-free registration to send)</option>
@@ -760,7 +819,7 @@ function mgrSettings() {
 window.saveSettings = async () => {
   const g = id => document.getElementById(id).value.trim();
   const out = await api('/api/manager/settings', {
-    timezone: g('st_tz'), board_pass: g('st_pass'), manager_pin: g('st_pin'), sms_number: g('st_num'), sms_default_kind: g('st_kind'), sms_reply: g('st_reply'),
+    timezone: g('st_tz'), board_pass: g('st_pass'), manager_pin: g('st_pin'), sms_number: g('st_num'), sms_default_kind: g('st_kind'), sms_reply: g('st_reply'), sms_notify: g('st_notify'),
   });
   if (out.error) { document.getElementById('st_err').textContent = out.error; return; }
   if (out.token) { mgrToken = out.token; sessionStorage.setItem('db_mgr_token', mgrToken); }
@@ -910,6 +969,7 @@ function formModal(title, fields, save) {
     ${fields.map(f => `<label>${esc(f.l)}</label>${
       f.type === 'select' ? `<select class="inline" data-k="${f.k}">${f.opts.map(([v, l]) => `<option value="${attr(v)}" ${String(f.v) === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`
       : f.type === 'textarea' ? `<textarea class="inline" data-k="${f.k}" placeholder="${attr(f.ph || '')}">${esc(f.v)}</textarea>`
+      : f.type === 'checks' ? `<div class="checks" data-k="${f.k}" data-multi="1">${f.opts.map(([v, l]) => `<label class="chk"><input type="checkbox" value="${attr(v)}" ${(f.v || []).includes(v) ? 'checked' : ''}> ${esc(l)}</label>`).join('') || '<span class="mini">No one yet.</span>'}</div>`
       : `<input class="inline" data-k="${f.k}" type="${f.type || 'text'}" value="${attr(f.v ?? '')}" placeholder="${attr(f.ph || '')}" ${f.type === 'number' ? 'step="any"' : ''} autocomplete="off">`
     }${f.hint ? `<div class="mini" style="margin-top:3px">${esc(f.hint)}</div>` : ''}`).join('')}
     <div class="err" id="fm_err"></div>
@@ -919,7 +979,8 @@ function formModal(title, fields, save) {
 }
 window.formSubmit = async () => {
   const vals = {};
-  for (const el of $modal.querySelectorAll('[data-k]')) vals[el.dataset.k] = el.value.trim ? el.value.trim() : el.value;
+  for (const el of $modal.querySelectorAll('[data-k]'))
+    vals[el.dataset.k] = el.dataset.multi ? [...el.querySelectorAll('input:checked')].map(i => i.value) : (el.value.trim ? el.value.trim() : el.value);
   const go = document.getElementById('fm_go'); go.disabled = true;
   const out = await formSave(vals);
   go.disabled = false;

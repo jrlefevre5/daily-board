@@ -113,6 +113,18 @@ button.small:disabled { opacity: .5; cursor: not-allowed; }
 .task .signed img { height: 34px; max-width: 120px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
 .typed { font-family: Caveat, "Segoe Script", "Bradley Hand", cursive; font-size: 22px; color: var(--ink); line-height: 1; }
 .task .act { flex: none; }
+.task .box small { font-size: 10px; font-weight: 800; color: var(--muted); letter-spacing: 0; }
+.task.each.done .box small { display: none; }
+.people { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.person { border: 1px solid var(--line); border-radius: 999px; padding: 5px 12px; font-size: 13px; background: #fff; color: var(--ink); cursor: pointer; font-family: inherit; display: inline-flex; align-items: center; gap: 6px; }
+button.person:hover { border-color: var(--accent); color: var(--accent); }
+button.person:disabled { cursor: default; color: var(--muted); }
+.person.done { background: var(--green-soft); color: var(--green); border-color: var(--green); font-weight: 600; }
+.person .undo { border: none; background: none; color: var(--green); opacity: .6; cursor: pointer; font-size: 14px; padding: 0 2px; line-height: 1; }
+.person .undo:hover { opacity: 1; color: var(--red); }
+.chip.who { background: #ede9fe; color: #5b21b6; }
+.checks { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 6px 0; }
+.checks .chk { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; }
 
 /* ---- announcements ---- */
 .ann { border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; margin-bottom: 10px; background: #fff; }
@@ -181,4 +193,14 @@ pre.cmds { background: #f6f8fa; border: 1px solid var(--line); border-radius: 10
 .preview .goal { padding: 10px 12px; }
 .preview .goal .nums { font-size: 22px; }
 .preview .plabel { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; font-weight: 700; padding: 8px 14px 0; }
-@media (max-width: 640px) { .bar .date { font-size: 19px; } .goal .nums { font-size: 24px; } .wrap { padding: 14px 16px 60px; } }
+@media (max-width: 640px) {
+  .bar .date { font-size: 19px; } .goal .nums { font-size: 24px; } .wrap { padding: 14px 16px 60px; }
+  .task { flex-wrap: wrap; }
+  .task .act { width: 100%; padding-left: 42px; }
+  .task .act button { width: 100%; }
+  .ann .foot .mini-btn { width: 100%; }
+  .modal { padding: 16px; }
+  .tabs { overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; }
+  .tabs button { padding: 10px 10px; white-space: nowrap; }
+  table.list { display: block; overflow-x: auto; }
+}

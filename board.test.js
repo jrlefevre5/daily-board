@@ -38,6 +38,13 @@ t('tasks', () => {
   assert.deepEqual(parseSms('task weekly sat mop the floor'), { action: 'task', kind: 'weekly', dow: 6, text: 'mop the floor' });
   assert.equal(parseSms('task').action, 'error');
   assert.equal(parseSms('weekly fri').action, 'error');
+  // who does it: ALL / EVERYONE = each person signs; @Name = one person
+  assert.deepEqual(parseSms('TASK ALL read the new return policy'), { action: 'task', kind: 'once', text: 'read the new return policy', assign: 'all' });
+  assert.deepEqual(parseSms('daily everyone: count your drawer'), { action: 'task', kind: 'daily', text: 'count your drawer', assign: 'all' });
+  assert.deepEqual(parseSms('WEEKLY Fri all deep-clean your station'), { action: 'task', kind: 'weekly', dow: 5, text: 'deep-clean your station', assign: 'all' });
+  assert.deepEqual(parseSms('TASK @Sam call the vendor back'), { action: 'task', kind: 'once', text: 'call the vendor back', mention: 'Sam' });
+  assert.deepEqual(parseSms('task @rose: order more bags'), { action: 'task', kind: 'once', text: 'order more bags', mention: 'rose' });
+  assert.deepEqual(parseSms('TASK Allison is covering the desk'), { action: 'task', kind: 'once', text: 'Allison is covering the desk' }); // "All..." as a name, not the keyword
 });
 
 t('goals', () => {
