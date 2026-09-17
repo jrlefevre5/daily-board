@@ -49,7 +49,10 @@ refreshes itself every minute).
   `TWILIO_FROM` alongside the auth token), creating a per-person task texts
   each person on it.
 - **Announcements** — pin to the top, attach an image, auto-hide after a date;
-  each employee can mark one as read so you can see who has seen it.
+  each employee can mark one as read so you can see who has seen it. With
+  outbound texting configured, an announcement can be texted to the whole
+  roster (per post, or every post via Settings → *Text announcements to
+  everyone*); a texted-in announcement goes to everyone but its sender.
 - **Prev / Next day** pages through history to see how a day was closed out.
 
 **The manager panel** (manager PIN) manages recurring goals and per-day

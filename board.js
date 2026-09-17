@@ -188,7 +188,7 @@ function twilioSignatureValid(token, url, params, header) {
 // Needs TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN + TWILIO_FROM (the board's number).
 // Best-effort: a failure is logged, never thrown at the caller.
 function smsOutboundReady() { return !!(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM); }
-async function sendSms(to, body) {
+async function sendSms(to, body, mediaUrl = '') {
   if (!smsOutboundReady()) return { ok: false, error: 'outbound not configured' };
   const sid = process.env.TWILIO_ACCOUNT_SID, token = process.env.TWILIO_AUTH_TOKEN;
   const base = process.env.TWILIO_API_BASE || 'https://api.twilio.com';
@@ -196,7 +196,7 @@ async function sendSms(to, body) {
     const r = await fetch(`${base}/2010-04-01/Accounts/${sid}/Messages.json`, {
       method: 'POST',
       headers: { Authorization: 'Basic ' + Buffer.from(`${sid}:${token}`).toString('base64'), 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ To: to, From: process.env.TWILIO_FROM, Body: body }).toString(),
+      body: new URLSearchParams({ To: to, From: process.env.TWILIO_FROM, Body: body, ...(/^https:\/\//.test(mediaUrl) ? { MediaUrl: mediaUrl } : {}) }).toString(),
     });
     const j = await r.json().catch(() => ({}));
     return r.ok ? { ok: true, sid: j.sid } : { ok: false, error: j.message || `HTTP ${r.status}` };
@@ -212,6 +212,24 @@ function e164(phone) {
 
 function mount(app, deps) {
   const { q, one, db, wrap, boardAuth, managerOnly, makeToken, safeEqual, recordFail, clientIp, baseUrl } = deps;
+
+  // Text an announcement to everyone on the roster with a phone (skipping whoever texted it in).
+  async function broadcastAnnouncement(ann, skipPhoneKey = '') {
+    if (!smsOutboundReady()) return { sent: 0 };
+    const people = await q("SELECT id, name, phone FROM staff WHERE active = 1 AND phone <> ''");
+    const biz = await db.getSetting('business_name', 'Daily Board');
+    const text = `${biz}: ${ann.title ? ann.title + ' — ' : ''}${ann.body}`.slice(0, 600);
+    let sent = 0;
+    for (const p of people) {
+      if (skipPhoneKey && phoneKey(p.phone) === skipPhoneKey) continue;
+      const to = e164(p.phone);
+      const r = await sendSms(to, text, ann.media_url);
+      await q('INSERT INTO sms_log (from_phone, staff_name, body, media_url, action, target_id, reply) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+        [to, p.name, text, ann.media_url || '', r.ok ? 'sent' : 'send-failed', ann.id, r.ok ? `Twilio ${r.sid}` : r.error]);
+      if (r.ok) sent++;
+    }
+    return { sent };
+  }
 
   // Text everyone a new per-person task applies to (skipping whoever created it by text).
   async function notifyTask(task, assignees, skipPhoneKey = '') {
@@ -443,7 +461,7 @@ function mount(app, deps) {
         board_pass: s.board_pass || '', manager_pin: s.manager_pin || '',
         sms_number: s.sms_number || '', sms_default_kind: s.sms_default_kind || 'announcement', sms_reply: s.sms_reply !== '0',
         sms_secured: !!(process.env.TWILIO_AUTH_TOKEN || process.env.SMS_WEBHOOK_SECRET),
-        sms_outbound: smsOutboundReady(), sms_notify: (s.sms_notify || '1') !== '0',
+        sms_outbound: smsOutboundReady(), sms_notify: (s.sms_notify || '1') !== '0', sms_broadcast: s.sms_broadcast === '1',
       },
     });
   }));
@@ -587,8 +605,12 @@ function mount(app, deps) {
     let id = Number(b.id) || 0;
     if (id) await q('UPDATE announcements SET title=$2, body=$3, media_url=$4, pinned=$5, expires_on=$6, active=$7 WHERE id=$1',
       [id, title, body, media, pinned, expires, active]);
-    else id = (await one(`INSERT INTO announcements (title, body, media_url, pinned, expires_on, active, source, created_by)
-      VALUES ($1,$2,$3,$4,$5,$6,'manual',$7) RETURNING id`, [title, body, media, pinned, expires, active, by])).id;
+    else {
+      id = (await one(`INSERT INTO announcements (title, body, media_url, pinned, expires_on, active, source, created_by)
+        VALUES ($1,$2,$3,$4,$5,$6,'manual',$7) RETURNING id`, [title, body, media, pinned, expires, active, by])).id;
+      const want = b.text_everyone != null ? !isOff(b.text_everyone) : await db.getSetting('sms_broadcast', '0') === '1';
+      if (want && active) { const { sent } = await broadcastAnnouncement({ id, title, body, media_url: media }); return res.json({ ok: true, id, notified: sent }); }
+    }
     res.json({ ok: true, id });
   }));
 
@@ -656,6 +678,7 @@ function mount(app, deps) {
     if (b.sms_default_kind != null) out.sms_default_kind = b.sms_default_kind === 'task' ? 'task' : 'announcement';
     if (b.sms_reply != null) out.sms_reply = isOff(b.sms_reply) ? '0' : '1';
     if (b.sms_notify != null) out.sms_notify = isOff(b.sms_notify) ? '0' : '1';
+    if (b.sms_broadcast != null) out.sms_broadcast = isOff(b.sms_broadcast) ? '0' : '1';
     for (const [k, v] of Object.entries(out)) await db.setSetting(k, v);
     // A changed PIN invalidates the caller's own token — hand back a fresh one.
     res.json({ ok: true, token: out.manager_pin != null ? await makeToken('manager') : undefined });
@@ -718,6 +741,10 @@ function mount(app, deps) {
         VALUES ('', $1, $2, 0, 1, 'sms', $3) RETURNING id`, [cmd.text || '(photo)', media, sender.name]);
       action = 'announcement'; targetId = row.id;
       msg = `Posted to announcements ✓${media ? ' (with photo)' : ''}`;
+      if (await db.getSetting('sms_broadcast', '0') === '1') {
+        const { sent } = await broadcastAnnouncement({ id: row.id, title: '', body: cmd.text || '(photo)', media_url: media }, key);
+        if (sent) msg += ` Texted ${sent} ${sent === 1 ? 'person' : 'people'}.`;
+      }
     } else if (cmd.action === 'task') {
       let assign = 'anyone', assignees = [], whoNote = '';
       if (cmd.assign === 'all') { assign = 'each'; whoNote = ' — everyone signs'; }

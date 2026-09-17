@@ -206,7 +206,8 @@ async function ensureDefaults() {
   await setDefault('sms_number', '');
   await setDefault('sms_default_kind', 'announcement');
   await setDefault('sms_reply', '1');
-  await setDefault('sms_notify', '1');           // text people when a per-person task is created for them            // text a confirmation back to the manager (off = inbound-only, no carrier registration needed)
+  await setDefault('sms_notify', '1');
+  await setDefault('sms_broadcast', '0');        // text every announcement to the whole roster           // text people when a per-person task is created for them            // text a confirmation back to the manager (off = inbound-only, no carrier registration needed)
   await setDefault('token_secret', crypto.randomBytes(32).toString('hex')); // signs login tokens
 }
 
