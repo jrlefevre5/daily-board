@@ -124,6 +124,17 @@ button.person:disabled { cursor: default; color: var(--muted); }
 .person .undo:hover { opacity: 1; color: var(--red); }
 .chip.who { background: #ede9fe; color: #5b21b6; }
 .checks { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 6px 0; }
+
+/* ---- peer evaluations ---- */
+.crit { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); font-weight: 600; font-size: 14px; }
+.crit:first-child { border-top: none; }
+.rate { display: flex; gap: 5px; flex: none; }
+.rate button { width: 36px; height: 36px; border-radius: 9px; border: 1px solid var(--line); background: #fff; font-weight: 700; cursor: pointer; font-family: inherit; color: var(--muted); }
+.rate button.on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.eval-card { border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; margin: 8px 0; font-size: 14px; }
+.eval-card .head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+.eval-card .scores { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
+@media (max-width: 640px) { .crit { flex-direction: column; align-items: flex-start; gap: 6px; } .rate button { width: 40px; height: 40px; } }
 .checks .chk { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; }
 
 /* ---- announcements ---- */

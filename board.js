@@ -325,10 +325,68 @@ function mount(app, deps) {
     };
   }
 
+  // ---- peer evaluations ----
+  async function evalSettings() {
+    let criteria = []; try { criteria = JSON.parse(await db.getSetting('eval_criteria', '[]')); } catch {}
+    criteria = (Array.isArray(criteria) ? criteria : []).map(c => String(c).trim()).filter(Boolean).slice(0, 12);
+    return { enabled: await db.getSetting('eval_enabled', '1') !== '0', criteria, repeat_weeks: Math.max(0, Math.min(12, num(await db.getSetting('eval_repeat_weeks', '1')))) };
+  }
+  // Teammates this person may rate this week: everyone active except themselves and
+  // anyone they rated within the last repeat_weeks weeks.
+  async function evalOptions(evaluatorId, week, repeatWeeks) {
+    const roster = await q('SELECT id, name FROM staff WHERE active = 1 AND id <> $1 ORDER BY name', [evaluatorId]);
+    if (!repeatWeeks) return roster.map(s => ({ ...s, recent: false }));
+    const since = addDays(week, -7 * repeatWeeks);
+    const recent = new Set((await q('SELECT subject_id FROM peer_evals WHERE evaluator_id = $1 AND week >= $2 AND week < $3', [evaluatorId, since, week])).map(r => r.subject_id));
+    return roster.map(s => ({ ...s, recent: recent.has(s.id) }));
+  }
+  app.get('/api/board/peer-eval/options', boardAuth, wrap(async (req, res) => {
+    const ev = await evalSettings();
+    const week = weekStart(await today());
+    const staffId = Number(req.query.staff_id);
+    const s = await one('SELECT id, name FROM staff WHERE id = $1 AND active = 1', [staffId]);
+    if (!s) return res.status(400).json({ error: 'Pick your name.' });
+    const already = await one('SELECT subject_name FROM peer_evals WHERE week = $1 AND evaluator_id = $2', [week, s.id]);
+    res.json({ week, criteria: ev.criteria, already: already ? already.subject_name : null, options: await evalOptions(s.id, week, ev.repeat_weeks) });
+  }));
+  app.post('/api/board/peer-eval', boardAuth, wrap(async (req, res) => {
+    const b = req.body || {};
+    const ev = await evalSettings();
+    if (!ev.enabled) return res.status(400).json({ error: 'Peer evaluations are switched off.' });
+    const week = weekStart(await today());
+    const who = await resolveSigner(b);
+    if (typeof who === 'string' || !who.staff_id) { if (b.staff_id && b.pin) recordFail(req); return res.status(400).json({ error: typeof who === 'string' ? who : 'Pick your name from the list.' }); }
+    const subject = await one('SELECT id, name FROM staff WHERE id = $1 AND active = 1', [Number(b.subject_id)]);
+    if (!subject) return res.status(400).json({ error: 'Pick a teammate to evaluate.' });
+    if (subject.id === who.staff_id) return res.status(400).json({ error: "You can't evaluate yourself." });
+    const opt = (await evalOptions(who.staff_id, week, ev.repeat_weeks)).find(o => o.id === subject.id);
+    if (!opt || opt.recent) return res.status(400).json({ error: `You rated ${subject.name} recently — pick someone different this week.` });
+    const scores = {};
+    for (const c of ev.criteria) {
+      const v = Number((b.scores || {})[c]);
+      if (!(v >= 1 && v <= 5)) return res.status(400).json({ error: `Rate "${c}" from 1 to 5.` });
+      scores[c] = Math.round(v);
+    }
+    const sig = readSignature(b);
+    if (!sig) return res.status(400).json({ error: 'Add your signature (draw it or type your name).' });
+    try {
+      const row = await one(`INSERT INTO peer_evals (week, evaluator_id, evaluator_name, subject_id, subject_name, scores, strengths, improve, signature, signature_kind, signed_ip)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+        [week, who.staff_id, who.staff_name, subject.id, subject.name, JSON.stringify(scores), clean(b.strengths, 1000), clean(b.improve, 1000), sig.signature, sig.signature_kind, clientIp(req)]);
+      res.json({ ok: true, id: row.id });
+    } catch (e) {
+      if (e.code === '23505') return res.status(409).json({ error: "You've already submitted this week's evaluation." });
+      throw e;
+    }
+  }));
+
   app.get('/api/board', boardAuth, wrap(async (req, res) => {
     const date = isDateStr(req.query.date) ? String(req.query.date) : await today();
     const data = await boardData(date);
     data.is_manager = req.role === 'manager';
+    const ev = await evalSettings();
+    data.peer_eval = { enabled: ev.enabled, week: weekStart(data.today), criteria: ev.criteria,
+      done: ev.enabled ? (await q('SELECT evaluator_id FROM peer_evals WHERE week = $1', [weekStart(data.today)])).map(r => r.evaluator_id) : [] };
     res.json(data);
   }));
 
@@ -450,8 +508,12 @@ function mount(app, deps) {
          WHERE e.created_at > now() - interval '30 days' ORDER BY e.created_at DESC LIMIT 500`),
     ]);
     const s = await db.getAllSettings();
+    const ev = await evalSettings();
+    const peer_evals = (await q(`SELECT id, week, evaluator_id, evaluator_name, subject_id, subject_name, scores, strengths, improve, signature_kind, created_at
+      FROM peer_evals WHERE week >= $1 ORDER BY week DESC, created_at DESC`, [addDays(weekStart(todayStr), -7 * 12)]))
+      .map(e => { let sc = {}; try { sc = JSON.parse(e.scores); } catch {} return { ...e, scores: sc }; });
     res.json({
-      today: todayStr, staff,
+      today: todayStr, staff, peer_evals, eval_settings: ev,
       goal_templates: goal_templates.map(t => ({ ...t, target: Number(t.target) })),
       goals: goals.map(g => ({ ...g, target: Number(g.target), baseline: g.baseline == null ? null : Number(g.baseline) })),
       goal_schedule, tasks, announcements, sms_log, completions, goal_entries: entries,
@@ -619,6 +681,7 @@ function mount(app, deps) {
     const b = req.body || {};
     if (b.completion_id) await q('DELETE FROM task_completions WHERE id = $1', [Number(b.completion_id)]);
     if (b.entry_id) await q('DELETE FROM goal_entries WHERE id = $1', [Number(b.entry_id)]);
+    if (b.eval_id) await q('DELETE FROM peer_evals WHERE id = $1', [Number(b.eval_id)]);
     if (b.ack_id) await q('DELETE FROM announcement_acks WHERE id = $1', [Number(b.ack_id)]);
     res.json({ ok: true });
   }));
@@ -679,6 +742,13 @@ function mount(app, deps) {
     if (b.sms_reply != null) out.sms_reply = isOff(b.sms_reply) ? '0' : '1';
     if (b.sms_notify != null) out.sms_notify = isOff(b.sms_notify) ? '0' : '1';
     if (b.sms_broadcast != null) out.sms_broadcast = isOff(b.sms_broadcast) ? '0' : '1';
+    if (b.eval_enabled != null) out.eval_enabled = isOff(b.eval_enabled) ? '0' : '1';
+    if (b.eval_repeat_weeks != null) out.eval_repeat_weeks = String(Math.max(0, Math.min(12, Math.round(num(b.eval_repeat_weeks)))));
+    if (b.eval_criteria != null) {
+      const list = (Array.isArray(b.eval_criteria) ? b.eval_criteria : String(b.eval_criteria).split(/\r?\n/)).map(c => clean(c, 60)).filter(Boolean).slice(0, 12);
+      if (!list.length) return res.status(400).json({ error: 'Add at least one thing to rate (one per line).' });
+      out.eval_criteria = JSON.stringify(list);
+    }
     for (const [k, v] of Object.entries(out)) await db.setSetting(k, v);
     // A changed PIN invalidates the caller's own token — hand back a fresh one.
     res.json({ ok: true, token: out.manager_pin != null ? await makeToken('manager') : undefined });

@@ -228,8 +228,80 @@ function render() {
         ${data.tasks_week.length ? data.tasks_week.map(taskRow(canSign)).join('') : `<div class="empty">No weekly tasks yet.</div>`}
       </div>
     </div>
+    ${evalPanel(canSign && isToday)}
     ${data.sms_number ? `<p class="mini" style="text-align:center">Managers: text <b>${esc(data.sms_number)}</b> to post — start with ANNOUNCE, TASK, DAILY, WEEKLY, or GOAL (or HELP).</p>` : ''}`;
 }
+
+// ---------- peer evaluations ----------
+function evalPanel(canDo) {
+  const pe = data.peer_eval;
+  if (!pe || !pe.enabled || !data.staff.length) return '';
+  const n = data.staff.filter(s => pe.done.includes(s.id)).length;
+  return `<div class="panel">
+    <h2>Peer evaluations <span class="count">week of ${esc(fmtShort(pe.week))} · ${n} / ${data.staff.length} done</span></h2>
+    <p class="mini" style="margin:0 0 10px">Each person rates one teammate a week — pick someone different each time. Only managers see what you write.</p>
+    <div class="people">${data.staff.map(s => pe.done.includes(s.id)
+      ? `<span class="person done">✓ ${esc(s.name)}</span>`
+      : `<button class="person" ${canDo ? `onclick="openEval(${s.id})"` : 'disabled'}>${esc(s.name)}</button>`).join('')}</div>
+    ${canDo ? `<div style="margin-top:12px"><button class="small" onclick="openEval(0)">Evaluate a teammate</button></div>` : ''}
+  </div>`;
+}
+let evalScores = {};
+window.openEval = staffId => {
+  evalScores = {};
+  const pe = data.peer_eval;
+  $modal.innerHTML = `<div class="modal-back" onclick="if(event.target===this)closeModal()"><div class="modal" style="max-width:600px">
+    <h3>Peer evaluation</h3><p class="sub">Week of ${esc(fmtShort(pe.week))}. Honest and specific helps most — managers read these, teammates don't.</p>
+    ${staffPicker('ev', data.staff.filter(s => !pe.done.includes(s.id)).map(s => s.id), staffId)}
+    <div id="ev_notice"></div>
+    <label>Who are you evaluating?</label>
+    <select class="inline" id="ev_subject"><option value="">Pick your name first…</option></select>
+    <div id="ev_form" style="display:none">
+      ${pe.criteria.map((c, i) => `<div class="crit"><span>${esc(c)}</span><div class="rate" data-c="${attr(c)}">${[1, 2, 3, 4, 5].map(v => `<button type="button" onclick="rate(this, ${v})">${v}</button>`).join('')}</div></div>`).join('')}
+      <div class="mini" style="margin:4px 0 0">1 = needs work · 3 = solid · 5 = outstanding</div>
+      <label>What are they doing well?</label><textarea class="inline" id="ev_strengths" maxlength="1000" placeholder="A specific example beats a general compliment."></textarea>
+      <label>One thing to work on</label><textarea class="inline" id="ev_improve" maxlength="1000" placeholder="Keep it kind and useful."></textarea>
+      <label>Signature</label>
+      ${padHtml()}
+    </div>
+    <div class="err" id="ev_err"></div>
+    <div class="row"><button class="small ghost" onclick="closeModal()">Cancel</button><button class="small green" id="ev_go" onclick="submitEval()" disabled>Submit evaluation</button></div>
+  </div></div>`;
+  onStaffPick('ev');
+  document.getElementById('ev_staff').addEventListener('change', evalLoad);
+  if (staffId) evalLoad();
+};
+async function evalLoad() {
+  const sel = document.getElementById('ev_staff'), sub = document.getElementById('ev_subject'), form = document.getElementById('ev_form'), notice = document.getElementById('ev_notice');
+  const id = Number(sel.value);
+  sub.innerHTML = '<option value="">Pick your name first…</option>'; form.style.display = 'none'; notice.innerHTML = ''; document.getElementById('ev_go').disabled = true;
+  if (!id) return;
+  const out = await api('/api/board/peer-eval/options?staff_id=' + id);
+  if (out.error) { notice.innerHTML = `<div class="notice warn">${esc(out.error)}</div>`; return; }
+  if (out.already) { notice.innerHTML = `<div class="notice">You've already submitted this week's evaluation (${esc(out.already)}). Thanks!</div>`; return; }
+  sub.innerHTML = '<option value="">Choose a teammate…</option>' + out.options.map(o => `<option value="${o.id}" ${o.recent ? 'disabled' : ''}>${esc(o.name)}${o.recent ? ' — rated recently, pick someone else' : ''}</option>`).join('');
+  if (!out.options.some(o => !o.recent)) notice.innerHTML = '<div class="notice">Nobody left to rate this week — you\'ve rated everyone recently.</div>';
+  form.style.display = ''; document.getElementById('ev_go').disabled = false;
+  initPad(document.getElementById('sg_pad'));
+}
+window.rate = (btn, v) => {
+  const wrap = btn.parentElement; evalScores[wrap.dataset.c] = v;
+  for (const b of wrap.querySelectorAll('button')) b.classList.toggle('on', Number(b.textContent) <= v);
+};
+window.submitEval = async () => {
+  const err = document.getElementById('ev_err'), go = document.getElementById('ev_go');
+  const body = { ...signerFields('ev'), subject_id: Number(document.getElementById('ev_subject').value), scores: evalScores,
+    strengths: document.getElementById('ev_strengths').value.trim(), improve: document.getElementById('ev_improve').value.trim(), signature: readSignature() };
+  if (!body.subject_id) { err.textContent = 'Choose a teammate to evaluate.'; return; }
+  for (const c of data.peer_eval.criteria) if (!evalScores[c]) { err.textContent = `Rate "${c}" first.`; return; }
+  if (!body.signature) { err.textContent = 'Add your signature.'; return; }
+  go.disabled = true; err.textContent = '';
+  const out = await api('/api/board/peer-eval', body);
+  go.disabled = false;
+  if (out.error) { err.textContent = out.error; return; }
+  if (body.staff_id) { lastStaff = body.staff_id; localStorage.setItem('db_me', String(lastStaff)); }
+  closeModal(); await loadBoard();
+};
 
 const goalCard = canSign => g => {
   const pct = g.target > 0 ? Math.min(100, Math.round(g.actual / g.target * 100)) : (g.actual > 0 ? 100 : 0);
@@ -371,14 +443,7 @@ window.openSign = (kind, id, staffId = 0) => {
     ${staffPicker('sg', allowed, staffId)}
     ${extra}
     <label>Signature</label>
-    <div id="sg_padwrap">
-      <div class="pad"><canvas id="sg_pad"></canvas><div class="line"></div><div class="hint">Sign with your finger or mouse</div></div>
-      <div class="padbar"><button class="mini-btn" onclick="padClear()">Clear</button><button class="mini-btn" onclick="padTyped(true)">Type it instead</button></div>
-    </div>
-    <div id="sg_typedwrap" style="display:none">
-      <input class="inline typed" id="sg_typed" placeholder="Type your full name" maxlength="120" autocomplete="off">
-      <div class="padbar"><span class="mini">Typed signatures are recorded with the time and device.</span><button class="mini-btn" onclick="padTyped(false)">Draw instead</button></div>
-    </div>
+    ${padHtml()}
     <div class="err" id="sg_err"></div>
     <div class="row"><button class="small ghost" onclick="closeModal()">Cancel</button><button class="small green" id="sg_go" onclick="submitSign('${kind}', ${id})">Confirm &amp; sign</button></div>
   </div></div>`;
@@ -388,6 +453,16 @@ window.openSign = (kind, id, staffId = 0) => {
   if (first) first.focus();
 };
 
+function padHtml() {
+  return `<div id="sg_padwrap">
+      <div class="pad"><canvas id="sg_pad"></canvas><div class="line"></div><div class="hint">Sign with your finger or mouse</div></div>
+      <div class="padbar"><button class="mini-btn" type="button" onclick="padClear()">Clear</button><button class="mini-btn" type="button" onclick="padTyped(true)">Type it instead</button></div>
+    </div>
+    <div id="sg_typedwrap" style="display:none">
+      <input class="inline typed" id="sg_typed" placeholder="Type your full name" maxlength="120" autocomplete="off">
+      <div class="padbar"><span class="mini">Typed signatures are recorded with the time and device.</span><button class="mini-btn" type="button" onclick="padTyped(false)">Draw instead</button></div>
+    </div>`;
+}
 function initPad(canvas) {
   const ctx = canvas.getContext('2d');
   const dpr = window.devicePixelRatio || 1;
@@ -505,7 +580,7 @@ async function reloadMgr() {
 }
 
 function renderManager() {
-  const tabs = [['goals', 'Goals'], ['tasks', 'Tasks'], ['announcements', 'Announcements'], ['staff', 'Staff'], ['sms', 'Text-in'], ['activity', 'Activity'], ['branding', 'Branding'], ['settings', 'Settings']];
+  const tabs = [['goals', 'Goals'], ['tasks', 'Tasks'], ['announcements', 'Announcements'], ['staff', 'Staff'], ['sms', 'Text-in'], ['activity', 'Activity'], ['evals', 'Evaluations'], ['branding', 'Branding'], ['settings', 'Settings']];
   document.getElementById('topRight').textContent = 'Manager panel';
   $app.innerHTML = `
     <div class="bar">
@@ -516,7 +591,7 @@ function renderManager() {
       <button class="mini-btn" onclick="managerLogout()">Sign out</button>
     </div>
     <div class="tabs">${tabs.map(([k, l]) => `<button class="${mgrTab === k ? 'on' : ''}" onclick="mgrTabTo('${k}')">${l}</button>`).join('')}</div>
-    <div class="panel">${({ goals: mgrGoals, tasks: mgrTasks, announcements: mgrAnns, staff: mgrStaff, sms: mgrSms, activity: mgrActivity, branding: mgrBranding, settings: mgrSettings })[mgrTab]()}</div>`;
+    <div class="panel">${({ goals: mgrGoals, tasks: mgrTasks, announcements: mgrAnns, staff: mgrStaff, sms: mgrSms, activity: mgrActivity, evals: mgrEvals, branding: mgrBranding, settings: mgrSettings })[mgrTab]()}</div>`;
   if (mgrTab === 'branding') brandPreview();
 }
 
@@ -786,6 +861,64 @@ window.downloadCsv = () => {
   for (const e of mgr.goal_entries) rows.push(['goal', e.created_at, e.label, e.date, e.staff_name, e.amount, e.note]);
   const blob = new Blob([rows.map(r => r.map(cell).join(',')).join('\n')], { type: 'text/csv' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `board-activity-${mgr.today}.csv`; a.click();
+};
+
+// ---------- Evaluations tab ----------
+let evalWeek = '';
+window.evalWeekTo = w => { evalWeek = w; renderManager(); };
+function mgrEvals() {
+  const es = mgr.eval_settings, thisWeek = weekStartOf(mgr.today);
+  const weeks = [...new Set([thisWeek, ...mgr.peer_evals.map(e => e.week)])].sort().reverse();
+  if (!weeks.includes(evalWeek)) evalWeek = thisWeek;
+  const rows = mgr.peer_evals.filter(e => e.week === evalWeek);
+  const crit = es.criteria;
+  const bySubject = {};
+  for (const e of rows) (bySubject[e.subject_name] = bySubject[e.subject_name] || []).push(e);
+  const avg = arr => arr.length ? (arr.reduce((a, b) => a + b, 0) / arr.length).toFixed(1) : '—';
+  const active = mgr.staff.filter(s => s.active);
+  const missing = active.filter(s => !rows.some(e => e.evaluator_id === s.id)).map(s => s.name);
+  return `<div class="tools"><b>Week of</b>
+      <select class="inline" onchange="evalWeekTo(this.value)">${weeks.map(w => `<option value="${w}" ${w === evalWeek ? 'selected' : ''}>${esc(fmtShort(w))} – ${esc(fmtShort(addDays(w, 6)))}${w === thisWeek ? ' (this week)' : ''}</option>`).join('')}</select>
+      <span class="mini">${rows.length} of ${active.length} submitted${missing.length ? ' · waiting on ' + esc(missing.join(', ')) : ''}</span>
+      <div class="spacer"></div><button class="mini-btn" onclick="downloadEvalsCsv()">Download CSV (12 weeks)</button></div>
+    <b>Averages this week</b>
+    <table class="list"><tr><th>Person</th><th>Evals</th>${crit.map(c => `<th>${esc(c)}</th>`).join('')}<th>Overall</th></tr>
+      ${Object.entries(bySubject).sort((a, b) => a[0].localeCompare(b[0])).map(([name, evs]) => {
+        const all = evs.flatMap(e => crit.map(c => Number(e.scores[c])).filter(Boolean));
+        return `<tr><td><b>${esc(name)}</b></td><td>${evs.length}</td>${crit.map(c => `<td>${avg(evs.map(e => Number(e.scores[c])).filter(Boolean))}</td>`).join('')}<td><b>${avg(all)}</b></td></tr>`; }).join('')
+        || `<tr><td colspan="${crit.length + 3}" class="empty">No evaluations for this week yet.</td></tr>`}
+    </table>
+    <b style="display:block;margin-top:18px">Evaluations</b>
+    ${rows.map(e => `<div class="eval-card">
+      <div class="head"><b>${esc(e.evaluator_name)}</b> <span class="mini">rated</span> <b>${esc(e.subject_name)}</b><span class="mini" style="margin-left:auto">${esc(fmtStamp(e.created_at))} · ${e.signature_kind}</span>
+        <button class="mini-btn danger" onclick="clearItem({eval_id:${e.id}})">Remove</button></div>
+      <div class="scores">${crit.map(c => `<span class="chip">${esc(c)} <b>${esc(e.scores[c] ?? '—')}</b></span>`).join('')}</div>
+      ${e.strengths ? `<div><span class="mini">Doing well:</span> ${esc(e.strengths)}</div>` : ''}
+      ${e.improve ? `<div><span class="mini">Work on:</span> ${esc(e.improve)}</div>` : ''}
+    </div>`).join('') || '<div class="empty">Nothing yet.</div>'}
+    <div class="settings" style="max-width:560px;margin-top:22px"><b>Evaluation settings</b>
+      <label for="es_on">Peer evaluations</label>
+      <select class="inline" id="es_on" style="width:100%"><option value="1" ${es.enabled ? 'selected' : ''}>On — the board asks each person for one a week</option><option value="0" ${!es.enabled ? 'selected' : ''}>Off</option></select>
+      <label for="es_crit">What to rate (one per line, 1–5 each)</label>
+      <textarea class="inline" id="es_crit" style="width:100%;min-height:100px">${esc(crit.join('\n'))}</textarea>
+      <label for="es_rep">Weeks before someone can rate the same teammate again</label>
+      <input class="inline" id="es_rep" type="number" min="0" max="12" value="${es.repeat_weeks}" style="width:120px"><div class="help">1 = not the same person two weeks running; 0 = no rule.</div>
+      <div class="err" id="es_err" style="color:var(--red);font-size:13px;margin-top:10px;min-height:1em"></div>
+      <div style="margin-top:8px"><button class="small green" onclick="saveEvalSettings()">Save</button></div>
+    </div>`;
+}
+function weekStartOf(d) { const x = new Date(d + 'T00:00:00Z'); return addDays(d, -((x.getUTCDay() + 6) % 7)); }
+window.saveEvalSettings = async () => {
+  const out = await api('/api/manager/settings', { eval_enabled: document.getElementById('es_on').value, eval_criteria: document.getElementById('es_crit').value, eval_repeat_weeks: document.getElementById('es_rep').value });
+  if (out.error) { document.getElementById('es_err').textContent = out.error; return; }
+  await reloadMgr();
+};
+window.downloadEvalsCsv = () => {
+  const crit = mgr.eval_settings.criteria, cell = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const rows = [['week', 'submitted', 'evaluator', 'subject', ...crit, 'doing well', 'work on']];
+  for (const e of mgr.peer_evals) rows.push([e.week, e.created_at, e.evaluator_name, e.subject_name, ...crit.map(c => e.scores[c] ?? ''), e.strengths, e.improve]);
+  const blob = new Blob([rows.map(r => r.map(cell).join(',')).join('\n')], { type: 'text/csv' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `peer-evaluations-${mgr.today}.csv`; a.click();
 };
 
 function mgrSettings() {

@@ -53,6 +53,12 @@ refreshes itself every minute).
   outbound texting configured, an announcement can be texted to the whole
   roster (per post, or every post via Settings → *Text announcements to
   everyone*); a texted-in announcement goes to everyone but its sender.
+- **Peer evaluations** — once a week each person rates one teammate (1–5 on a
+  manager-set list of criteria, plus "doing well" and "one thing to work on")
+  and signs. They pick whom, excluding themselves and anyone they rated within
+  the last *N* weeks, so it rotates. The board shows only who has submitted;
+  managers see everything under Manager panel → Evaluations, with per-person
+  averages by week and a CSV export.
 - **Prev / Next day** pages through history to see how a day was closed out.
 
 **The manager panel** (manager PIN) manages recurring goals and per-day

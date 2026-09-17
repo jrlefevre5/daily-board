@@ -162,6 +162,23 @@ CREATE TABLE IF NOT EXISTS announcement_acks (
   signed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ack_once_idx ON announcement_acks (announcement_id, LOWER(staff_name));
+-- Weekly peer evaluations: each person rates one teammate per week (Mon–Sun).
+CREATE TABLE IF NOT EXISTS peer_evals (
+  id SERIAL PRIMARY KEY,
+  week TEXT NOT NULL,                        -- the week's Monday
+  evaluator_id INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+  evaluator_name TEXT NOT NULL DEFAULT '',
+  subject_id INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+  subject_name TEXT NOT NULL DEFAULT '',
+  scores TEXT NOT NULL DEFAULT '{}',         -- JSON {criterion: 1..5}
+  strengths TEXT NOT NULL DEFAULT '',
+  improve TEXT NOT NULL DEFAULT '',
+  signature TEXT NOT NULL DEFAULT '',
+  signature_kind TEXT NOT NULL DEFAULT 'typed',
+  signed_ip TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (week, evaluator_id)
+);
 -- Every inbound text, whatever became of it.
 CREATE TABLE IF NOT EXISTS sms_log (
   id SERIAL PRIMARY KEY,
@@ -179,14 +196,14 @@ CREATE TABLE IF NOT EXISTS sms_log (
 -- the table owner, which bypasses RLS, so nothing changes for it.
 DO $$ DECLARE t text; BEGIN
   FOREACH t IN ARRAY ARRAY['settings','staff','goal_templates','goals','goal_entries','tasks',
-    'task_completions','announcements','announcement_acks','sms_log'] LOOP
+    'task_completions','announcements','announcement_acks','sms_log','peer_evals'] LOOP
     EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
   END LOOP;
 END $$;
 `;
 
 // Bump when DDL or defaults change; a mismatch replays the (idempotent) migration.
-const SCHEMA_VERSION = '4';
+const SCHEMA_VERSION = '5';
 
 async function ensureDefaults() {
   const setDefault = (k, v) => q('INSERT INTO settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO NOTHING', [k, v]);
@@ -207,7 +224,11 @@ async function ensureDefaults() {
   await setDefault('sms_default_kind', 'announcement');
   await setDefault('sms_reply', '1');
   await setDefault('sms_notify', '1');
-  await setDefault('sms_broadcast', '0');        // text every announcement to the whole roster           // text people when a per-person task is created for them            // text a confirmation back to the manager (off = inbound-only, no carrier registration needed)
+  await setDefault('sms_broadcast', '0');        // text every announcement to the whole roster
+  // Peer evaluations
+  await setDefault('eval_enabled', '1');
+  await setDefault('eval_criteria', JSON.stringify(['Teamwork', 'Customer service', 'Reliability', 'Attitude']));
+  await setDefault('eval_repeat_weeks', '1');    // weeks before you may rate the same teammate again (0 = no rule)           // text people when a per-person task is created for them            // text a confirmation back to the manager (off = inbound-only, no carrier registration needed)
   await setDefault('token_secret', crypto.randomBytes(32).toString('hex')); // signs login tokens
 }
 
