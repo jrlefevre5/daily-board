@@ -104,7 +104,7 @@ function managerOnly(req, res, next) {
 
 // Public branding for the sign-in screen.
 app.get('/api/config', wrap(async (req, res) => {
-  res.json({ ...(await db.branding()), board_pass_set: !!(await db.getSetting('board_pass', '')).trim() });
+  res.json({ ...(await db.branding()), sms_number: await db.getSetting('sms_number', ''), board_pass_set: !!(await db.getSetting('board_pass', '')).trim() });
 }));
 
 // Sign in with either the board password or the manager PIN.

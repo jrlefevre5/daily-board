@@ -137,6 +137,7 @@ function renderLogin(err) {
           <div class="err" id="ml_err"></div>
           <div style="margin-top:12px"><button class="small ghost" type="submit">Sign in as manager</button></div>
         </form>
+        <p class="mini" style="margin:12px 0 0"><a href="sms.html">Text message policy &amp; opt-in</a></p>
         ${cfg.board_pass_set === false ? `<p class="mini" style="margin:12px 0 0">First time here? Sign in with the manager PIN (default <b>1234</b>), then set a board password and change the PIN under Settings.</p>` : ''}
       </div>
     </div></div>`;
@@ -779,10 +780,12 @@ function mgrStaff() {
   return `<p class="kicker-note">Everyone who signs things off on the board. A PIN (optional) means nobody can sign as that person without it.
     <b>Managers with a mobile number on file can post to the board by text.</b></p>
     <div class="tools"><div class="spacer"></div><button class="small" onclick="editStaff()">+ Add person</button></div>
-    <table class="list"><tr><th>Name</th><th>Role</th><th>Phone</th><th>PIN</th><th></th></tr>
-      ${mgr.staff.map(s => `<tr class="${s.active ? '' : 'off'}"><td>${esc(s.name)} ${onoff(s.active)}</td><td>${s.role}</td><td>${esc(s.phone)}</td><td>${s.has_pin ? 'set' : '—'}</td>
+    <p class="mini" style="margin:-6px 0 12px">Text opt-in page for staff (also what Twilio asks for as the opt-in policy): <code class="url">${esc(location.origin + '/sms.html')}</code></p>
+    <table class="list"><tr><th>Name</th><th>Role</th><th>Phone</th><th>Texts</th><th>PIN</th><th></th></tr>
+      ${mgr.staff.map(s => `<tr class="${s.active ? '' : 'off'}"><td>${esc(s.name)} ${onoff(s.active)}</td><td>${s.role}</td><td>${esc(s.phone)}</td>
+        <td class="mini">${!s.phone ? '—' : s.sms_consent_at ? `<span class="chip sms">opted in</span> ${esc(fmtShort(String(s.sms_consent_at).slice(0, 10)))}` : 'added by manager'}</td><td>${s.has_pin ? 'set' : '—'}</td>
         <td class="acts"><button class="mini-btn" onclick="editStaff(${s.id})">Edit</button> <button class="mini-btn danger" onclick="delStaff(${s.id})">Delete</button></td></tr>`).join('')
-        || '<tr><td colspan="5" class="empty">No one yet — until you add people, the board asks signers to type their name.</td></tr>'}
+        || '<tr><td colspan="6" class="empty">No one yet — until you add people, the board asks signers to type their name.</td></tr>'}
     </table>`;
 }
 window.editStaff = id => {
@@ -815,6 +818,7 @@ function mgrSms() {
       <li>Texting people about new tasks: ${s.sms_outbound ? '<span class="chip sms">On</span>' : '<span class="chip due">Not set up</span>'} — add <code>TWILIO_ACCOUNT_SID</code> (Console → Account Info) and <code>TWILIO_FROM</code> (this number, e.g. +12085550100) in Vercel and redeploy. Sends need the same registration as replies.</li>
       <li>Replies: ${s.sms_reply ? 'the board texts "Posted ✓" back — a US number must be A2P-registered (local) or verified (toll-free) in Twilio for those to deliver.' : '<b>off</b> — the board posts silently; nothing to register.'} Change under Settings.</li>
       <li>Under Staff, give each manager the Manager role and their mobile number. Texts from any other number are ignored (they show below as rejected).</li>
+      <li>Toll-free verification / A2P forms ask for an opt-in policy: use <code class="url">${esc(location.origin + '/sms.html')}</code> — it states the program, frequency, STOP/HELP, privacy, and has the opt-in form staff fill in.</li>
       <li>Save the number under Settings so the board can show it to everyone.</li>
     </ol>
     <b>Commands</b> — the first word of the text picks where it goes:

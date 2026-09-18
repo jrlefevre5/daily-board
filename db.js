@@ -179,6 +179,16 @@ CREATE TABLE IF NOT EXISTS peer_evals (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (week, evaluator_id)
 );
+-- Text-message consent, recorded from the public opt-in page (sms.html).
+ALTER TABLE staff ADD COLUMN IF NOT EXISTS sms_consent_at TIMESTAMPTZ;
+CREATE TABLE IF NOT EXISTS sms_consents (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  ip TEXT NOT NULL DEFAULT '',
+  user_agent TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 -- Every inbound text, whatever became of it.
 CREATE TABLE IF NOT EXISTS sms_log (
   id SERIAL PRIMARY KEY,
@@ -196,14 +206,14 @@ CREATE TABLE IF NOT EXISTS sms_log (
 -- the table owner, which bypasses RLS, so nothing changes for it.
 DO $$ DECLARE t text; BEGIN
   FOREACH t IN ARRAY ARRAY['settings','staff','goal_templates','goals','goal_entries','tasks',
-    'task_completions','announcements','announcement_acks','sms_log','peer_evals'] LOOP
+    'task_completions','announcements','announcement_acks','sms_log','peer_evals','sms_consents'] LOOP
     EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
   END LOOP;
 END $$;
 `;
 
 // Bump when DDL or defaults change; a mismatch replays the (idempotent) migration.
-const SCHEMA_VERSION = '5';
+const SCHEMA_VERSION = '6';
 
 async function ensureDefaults() {
   const setDefault = (k, v) => q('INSERT INTO settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO NOTHING', [k, v]);

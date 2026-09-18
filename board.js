@@ -492,7 +492,7 @@ function mount(app, deps) {
   app.get('/api/manager/overview', managerOnly, wrap(async (req, res) => {
     const todayStr = await today();
     const [staff, goal_templates, goals, goal_schedule, tasks, announcements, sms_log, completions, entries] = await Promise.all([
-      q('SELECT id, name, phone, role, active, created_at, (pin <> \'\') AS has_pin FROM staff ORDER BY active DESC, name'),
+      q('SELECT id, name, phone, role, active, created_at, sms_consent_at, (pin <> \'\') AS has_pin FROM staff ORDER BY active DESC, name'),
       q('SELECT * FROM goal_templates ORDER BY active DESC, sort, id'),
       q('SELECT * FROM goals WHERE date >= $1 ORDER BY date, sort, id', [addDays(todayStr, -1)]),
       q(`SELECT template_id, COUNT(*)::int AS days, MIN(date) AS from_date, MAX(date) AS to_date,
@@ -752,6 +752,20 @@ function mount(app, deps) {
     for (const [k, v] of Object.entries(out)) await db.setSetting(k, v);
     // A changed PIN invalidates the caller's own token — hand back a fresh one.
     res.json({ ok: true, token: out.manager_pin != null ? await makeToken('manager') : undefined });
+  }));
+
+  // ---------- text-message opt-in (public page: /sms.html) ----------
+  app.post('/api/sms/opt-in', wrap(async (req, res) => {
+    const b = req.body || {};
+    const name = clean(b.name, 80), phone = clean(b.phone, 30);
+    if (!name) return res.status(400).json({ error: 'Enter your name.' });
+    if (phoneKey(phone).length !== 10) return res.status(400).json({ error: 'Enter a 10-digit US mobile number.' });
+    if (!b.agree) return res.status(400).json({ error: 'Tick the box to agree.' });
+    await q('INSERT INTO sms_consents (name, phone, ip, user_agent) VALUES ($1,$2,$3,$4)', [name, phone, clientIp(req), clean(req.headers['user-agent'], 200)]);
+    // Mark the matching roster entry (by number) as consented.
+    const key = phoneKey(phone);
+    for (const s of await q("SELECT id, phone FROM staff WHERE phone <> ''")) if (phoneKey(s.phone) === key) await q('UPDATE staff SET sms_consent_at = now() WHERE id = $1', [s.id]);
+    res.json({ ok: true });
   }));
 
   // ---------- inbound text messages ----------

@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Text message policy</title>
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    .doc { max-width: 720px; }
+    .doc h1 { font-size: 26px; margin: 8px 0 4px; }
+    .doc h2 { font-size: 15px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--accent); margin: 26px 0 8px; }
+    .doc p, .doc li { font-size: 15px; }
+    .doc .optin { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; margin-top: 14px; }
+    .doc label { display: block; font-size: 11.5px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); margin: 12px 0 5px; }
+    .doc .agree { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; margin: 14px 0; text-transform: none; letter-spacing: 0; color: var(--ink); font-weight: 500; }
+    .doc .agree input { margin-top: 4px; width: 18px; height: 18px; }
+    .doc .err { color: var(--red); font-size: 13px; min-height: 1em; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <nav class="topbar"><div class="inner">
+    <a class="brand" href="/"><span class="mark" id="brandMark">✓</span><span class="names"><span id="brandName">Daily Board</span><span class="tag" id="brandTag"></span></span></a>
+    <span class="mini">Text message policy</span>
+  </div></nav>
+  <div class="wrap"><div class="doc">
+    <h1>Text message notifications</h1>
+    <p class="mini">Program: <b id="biz">Daily Board</b> team notifications · <span id="num"></span></p>
+
+    <h2>What you'll receive</h2>
+    <p>Work notifications from your manager's team board: tasks assigned to you, store announcements, and occasional reminders (for example, a weekly peer-evaluation reminder). Messages come from the number above. These are internal, work-related messages only — no marketing, no promotions, and your number is never shared or sold.</p>
+
+    <h2>How often</h2>
+    <p>Message frequency varies with what your manager posts — typically a few messages a week. Message and data rates may apply.</p>
+
+    <h2>Opting out and help</h2>
+    <ul>
+      <li>Reply <b>STOP</b> at any time to stop receiving texts. You'll get one confirmation message and nothing further.</li>
+      <li>Reply <b>START</b> to opt back in.</li>
+      <li>Reply <b>HELP</b> for help, or ask your manager.</li>
+    </ul>
+
+    <h2>Privacy</h2>
+    <p>Your name and mobile number are kept on the team roster only so the board can reach you about your work. They are visible to your managers and are not shared with anyone else, used for advertising, or sold. Ask your manager to remove your number at any time.</p>
+
+    <h2>How consent is collected</h2>
+    <p>Team members opt in below (or tell their manager, who records it). Only people who have opted in — or who have been added to the roster by a manager after agreeing — receive messages.</p>
+
+    <div class="optin">
+      <form onsubmit="optIn(); return false">
+        <label for="oi_name">Your name</label><input class="inline" id="oi_name" maxlength="80" style="width:100%" autocomplete="name">
+        <label for="oi_phone">Mobile number</label><input class="inline" id="oi_phone" inputmode="tel" placeholder="(555) 555-0100" maxlength="30" style="width:100%" autocomplete="tel">
+        <label class="agree"><input type="checkbox" id="oi_agree"> <span>I agree to receive work-related text notifications from <b class="bizname">this team board</b> at the number above. Message frequency varies; message and data rates may apply. Reply STOP to cancel, HELP for help.</span></label>
+        <div class="err" id="oi_err"></div>
+        <button class="small" type="submit" id="oi_go">Opt in to texts</button>
+      </form>
+      <div id="oi_done" style="display:none" class="notice">You're opted in. Your manager will see it on the roster — thanks!</div>
+    </div>
+  </div></div>
+  <script>
+    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    fetch('/api/config').then(r => r.json()).then(b => {
+      const name = b.business_name || 'Daily Board';
+      document.getElementById('brandName').textContent = name; document.getElementById('biz').textContent = name;
+      for (const el of document.querySelectorAll('.bizname')) el.textContent = name;
+      document.title = name + ' — text message policy';
+      document.getElementById('brandTag').textContent = b.tagline || '';
+      if (b.sms_number) document.getElementById('num').textContent = 'Messages come from ' + b.sms_number;
+      const r = document.documentElement.style;
+      if (b.theme_color) { r.setProperty('--accent', b.theme_color); r.setProperty('--accent-soft', `color-mix(in srgb, ${b.theme_color} 12%, white)`); r.setProperty('--accent-ink', `color-mix(in srgb, ${b.theme_color} 70%, black)`); }
+      if (b.theme_topbar) r.setProperty('--topbar', b.theme_topbar);
+      if (b.theme_bg) r.setProperty('--bg', b.theme_bg);
+      if (b.logo) { const m = document.getElementById('brandMark'); m.innerHTML = `<img src="${esc(b.logo)}" alt="">`; m.classList.add('logo'); }
+    }).catch(() => {});
+    async function optIn() {
+      const err = document.getElementById('oi_err'), go = document.getElementById('oi_go');
+      const body = { name: document.getElementById('oi_name').value.trim(), phone: document.getElementById('oi_phone').value.trim(), agree: document.getElementById('oi_agree').checked };
+      if (!body.name) return err.textContent = 'Enter your name.';
+      if (!body.agree) return err.textContent = 'Tick the box to agree.';
+      go.disabled = true; err.textContent = '';
+      const r = await fetch('/api/sms/opt-in', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const j = await r.json().catch(() => ({}));
+      go.disabled = false;
+      if (j.error) return err.textContent = j.error;
+      document.querySelector('.optin form').style.display = 'none'; document.getElementById('oi_done').style.display = '';
+    }
+  </script>
+</body>
+</html>
