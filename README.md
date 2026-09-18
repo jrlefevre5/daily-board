@@ -108,7 +108,8 @@ you prefer (Settings).
 4. Under Staff, give each manager the Manager role and their mobile number.
 
 `/sms.html` is a public text-message policy + opt-in page (program, frequency,
-STOP/HELP, privacy, consent form). Give its URL to Twilio when toll-free
+STOP/HELP, privacy, consent form); opting in sends the standard confirmation
+text when outbound texting is configured. Give its URL to Twilio when toll-free
 verification or A2P registration asks for an opt-in policy; each opt-in is
 recorded and shown next to the person under Staff.
 

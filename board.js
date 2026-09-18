@@ -765,6 +765,14 @@ function mount(app, deps) {
     // Mark the matching roster entry (by number) as consented.
     const key = phoneKey(phone);
     for (const s of await q("SELECT id, phone FROM staff WHERE phone <> ''")) if (phoneKey(s.phone) === key) await q('UPDATE staff SET sms_consent_at = now() WHERE id = $1', [s.id]);
+    // The confirmation text carriers expect after an opt-in (program, frequency, rates, STOP/HELP).
+    if (smsOutboundReady()) {
+      const biz = await db.getSetting('business_name', 'Daily Board');
+      const msg = `${biz}: You're opted in to team texts (tasks & announcements). Msg frequency varies. Msg & data rates may apply. Reply STOP to opt out, HELP for help.`;
+      const r = await sendSms(e164(phone), msg);
+      await q('INSERT INTO sms_log (from_phone, staff_name, body, media_url, action, target_id, reply) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+        [e164(phone), name, msg, '', r.ok ? 'sent' : 'send-failed', null, r.ok ? `Twilio ${r.sid} (opt-in confirmation)` : r.error]);
+    }
     res.json({ ok: true });
   }));
 
