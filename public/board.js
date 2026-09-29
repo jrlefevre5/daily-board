@@ -816,9 +816,9 @@ function mgrSms() {
         ${s.sms_secured ? '<span class="chip sms">Secured</span>' : '<span class="chip due">Not set yet</span>'}</li>
       <li>Announcements texted to everyone: ${s.sms_broadcast ? '<span class="chip sms">On</span>' : '<span class="chip">Off</span>'} (Settings). Photos ride along as MMS.</li>
       <li>Texting people about new tasks: ${s.sms_outbound ? '<span class="chip sms">On</span>' : '<span class="chip due">Not set up</span>'} — add <code>TWILIO_ACCOUNT_SID</code> (Console → Account Info) and <code>TWILIO_FROM</code> (this number, e.g. +12085550100) in Vercel and redeploy. Sends need the same registration as replies.</li>
-      <li>Replies: ${s.sms_reply ? 'the board texts "Posted ✓" back — a US number must be A2P-registered (local) or verified (toll-free) in Twilio for those to deliver.' : '<b>off</b> — the board posts silently; nothing to register.'} Change under Settings.</li>
+      <li>Replies: ${s.sms_reply ? 'the board texts "Posted ✓" back — a US local number must be on an approved A2P 10DLC campaign in Twilio for those to deliver.' : '<b>off</b> — the board posts silently; nothing to register.'} Change under Settings.</li>
       <li>Under Staff, give each manager the Manager role and their mobile number. Texts from any other number are ignored (they show below as rejected).</li>
-      <li>Toll-free verification / A2P forms ask for an opt-in policy: use <code class="url">${esc(location.origin + '/sms.html')}</code> — it states the program, frequency, STOP/HELP, privacy, and has the opt-in form staff fill in.</li>
+      <li>A2P 10DLC campaign registration asks for an opt-in policy: use <code class="url">${esc(location.origin + '/sms.html')}</code> — it states the program, frequency, STOP/HELP, privacy, and has the opt-in form staff fill in.</li>
       <li>Save the number under Settings so the board can show it to everyone.</li>
     </ol>
     <b>Commands</b> — the first word of the text picks where it goes:
@@ -954,7 +954,7 @@ function mgrSettings() {
     </select>
     <label for="st_reply">Text a confirmation back to the manager</label>
     <select class="inline" id="st_reply" style="width:100%">
-      <option value="1" ${s.sms_reply ? 'selected' : ''}>Yes — reply "Posted ✓" (US numbers need Twilio's A2P/toll-free registration to send)</option>
+      <option value="1" ${s.sms_reply ? 'selected' : ''}>Yes — reply "Posted ✓" (US local numbers need Twilio's A2P 10DLC registration to send)</option>
       <option value="0" ${!s.sms_reply ? 'selected' : ''}>No — inbound only (no registration needed; the Text-in tab still logs every text)</option>
     </select>
     <div class="err" id="st_err" style="color:var(--red);font-size:13px;margin-top:10px;min-height:1em"></div>
