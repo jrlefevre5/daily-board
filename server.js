@@ -108,16 +108,20 @@ app.get('/api/config', wrap(async (req, res) => {
 }));
 
 // Web app manifest, so the board can be installed to a phone's home screen
-// (iOS: Safari → Share → Add to Home Screen) and open full-screen like an app.
+// (iOS: Safari → Share → Add to Home Screen; Android: Chrome → Install app)
+// and open full-screen like an app.
 app.get('/api/manifest', wrap(async (req, res) => {
   const b = await db.branding();
   res.type('application/manifest+json').set('Cache-Control', 'no-cache').json({
-    name: b.business_name, short_name: b.business_name, // home-screen label follows Branding
+    id: '/', name: b.business_name, short_name: b.business_name, // home-screen label follows Branding
     start_url: '/', scope: '/', display: 'standalone',
     background_color: b.theme_bg, theme_color: b.theme_topbar,
+    // The check sits inside the centre 80%, so the same art works as Android's maskable (cropped) icon.
     icons: [
-      { src: '/icon-180.png', sizes: '180x180', type: 'image/png' },
+      { src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
       { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+      { src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'maskable' },
+      { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
     ],
   });
 }));
