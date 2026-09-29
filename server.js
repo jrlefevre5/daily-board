@@ -107,6 +107,21 @@ app.get('/api/config', wrap(async (req, res) => {
   res.json({ ...(await db.branding()), sms_number: await db.getSetting('sms_number', ''), board_pass_set: !!(await db.getSetting('board_pass', '')).trim() });
 }));
 
+// Web app manifest, so the board can be installed to a phone's home screen
+// (iOS: Safari → Share → Add to Home Screen) and open full-screen like an app.
+app.get('/api/manifest', wrap(async (req, res) => {
+  const b = await db.branding();
+  res.type('application/manifest+json').set('Cache-Control', 'no-cache').json({
+    name: b.business_name, short_name: b.business_name, // home-screen label follows Branding
+    start_url: '/', scope: '/', display: 'standalone',
+    background_color: b.theme_bg, theme_color: b.theme_topbar,
+    icons: [
+      { src: '/icon-180.png', sizes: '180x180', type: 'image/png' },
+      { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+    ],
+  });
+}));
+
 // Sign in with either the board password or the manager PIN.
 app.post('/api/login', wrap(async (req, res) => {
   if (tooManyFails(req)) return res.status(429).json({ error: 'Too many failed attempts — try again in 10 minutes.' });

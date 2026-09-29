@@ -121,6 +121,20 @@ Any provider that can POST `from` + `body` (form or JSON) to that URL works
 too — set `SMS_WEBHOOK_SECRET` and have it send the value as an
 `X-Webhook-Secret` header.
 
+## Install it as an app (no App Store)
+
+The board installs straight from the browser and then opens full-screen from
+its own home-screen icon, like any other app:
+
+- **iPhone / iPad:** open the site in **Safari** → Share button → *Add to Home
+  Screen* → Add.
+- **Android:** open it in Chrome → ⋮ menu → *Install app* (or *Add to Home
+  screen*).
+
+The home-screen name follows Branding → business name. Updates arrive with
+every deploy — nothing to reinstall. The installed app keeps its own sign-in,
+separate from the browser, so sign in once inside it.
+
 ## Deploy (about five minutes, free tiers)
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fjrlefevre5%2Fdaily-board&project-name=daily-board&repository-name=daily-board&env=DATABASE_URL&envDescription=Postgres%20connection%20string%20(Neon%2C%20Supabase%2C%20or%20any%20Postgres)&envLink=https%3A%2F%2Fgithub.com%2Fjrlefevre5%2Fdaily-board%23database)
