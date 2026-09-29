@@ -109,12 +109,12 @@ you prefer (Settings).
 
 `/sms.html` is a public text-message policy + opt-in page (program, frequency,
 STOP/HELP, privacy, consent form); opting in sends the standard confirmation
-text when outbound texting is configured. Give its URL to Twilio when toll-free
-verification or A2P registration asks for an opt-in policy; each opt-in is
+text when outbound texting is configured. Give its URL to Twilio when A2P 10DLC
+campaign registration asks for an opt-in policy; each opt-in is
 recorded and shown next to the person under Staff.
 
 Replies ("Posted ✓") can be switched off under Settings — then the number is
-inbound-only, which needs no A2P/toll-free registration in Twilio; the Text-in
+inbound-only, which needs no A2P 10DLC registration in Twilio; the Text-in
 tab still logs every text and what became of it.
 
 Any provider that can POST `from` + `body` (form or JSON) to that URL works
