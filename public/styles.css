@@ -215,3 +215,11 @@ pre.cmds { background: #f6f8fa; border: 1px solid var(--line); border-radius: 10
   .tabs button { padding: 10px 10px; white-space: nowrap; }
   table.list { display: block; overflow-x: auto; }
 }
+/* Installed to a home screen it runs full-screen (viewport-fit=cover): keep clear of the notch and home bar. */
+@supports (padding: max(0px)) {
+  .topbar .inner { padding-left: max(20px, env(safe-area-inset-left)); padding-right: max(20px, env(safe-area-inset-right)); }
+  .wrap { padding-left: max(20px, env(safe-area-inset-left)); padding-right: max(20px, env(safe-area-inset-right)); padding-bottom: calc(80px + env(safe-area-inset-bottom)); }
+  @media (max-width: 640px) {
+    .wrap { padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); padding-bottom: calc(60px + env(safe-area-inset-bottom)); }
+  }
+}
