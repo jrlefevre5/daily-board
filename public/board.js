@@ -11,7 +11,7 @@ function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;
 const attr = esc;
 
 let boardToken = localStorage.getItem('db_board_token') || '';
-let mgrToken = sessionStorage.getItem('db_mgr_token') || '';
+let mgrToken = localStorage.getItem('db_mgr_token') || '';
 let mgrName = localStorage.getItem('db_mgr_name') || '';
 let cfg = {};             // /api/config (public branding)
 let data = null;          // /api/board payload for viewDate
@@ -20,6 +20,7 @@ let mgr = null;           // /api/manager/overview payload while the panel is op
 let mgrTab = 'goals';
 let lastStaff = Number(localStorage.getItem('db_me') || 0);
 let clockTimer = null, refreshTimer = null;
+let lastLoad = 0, refreshing = false, hintTimer = null;   // see "keeping the board current"
 
 function headers() {
   const h = { 'Content-Type': 'application/json' };
@@ -28,7 +29,7 @@ function headers() {
   return h;
 }
 async function api(path, body) {
-  const r = await fetch(path, { method: body ? 'POST' : 'GET', headers: headers(), body: body ? JSON.stringify(body) : undefined });
+  const r = await fetch(path, { method: body ? 'POST' : 'GET', headers: headers(), body: body ? JSON.stringify(body) : undefined, cache: 'no-store' });
   let j = {}; try { j = await r.json(); } catch {}
   return { status: r.status, ...j };
 }
@@ -52,7 +53,7 @@ async function boot() {
 async function loadBoard() {
   let out = await api('/api/board' + (viewDate ? `?date=${viewDate}` : ''));
   if (out.status === 401 && mgrToken) {           // manager session expired — fall back to the board token
-    mgrToken = ''; mgr = null; sessionStorage.removeItem('db_mgr_token');
+    mgrToken = ''; mgr = null; localStorage.removeItem('db_mgr_token');
     out = boardToken ? await api('/api/board' + (viewDate ? `?date=${viewDate}` : '')) : out;
   }
   if (out.status === 401 || out.status === 429) {
@@ -60,7 +61,7 @@ async function loadBoard() {
     return renderLogin(out.error);
   }
   if (out.error) { $app.innerHTML = `<div class="notice warn">${esc(out.error)}</div>`; return; }
-  data = out;
+  data = out; lastLoad = Date.now();
   if (!viewDate) viewDate = data.today;
   applyBranding(data);
   render();
@@ -115,40 +116,32 @@ function applyBranding(b) {
 function renderLogin(err) {
   stopTimers();
   document.getElementById('topRight').textContent = '';
+  document.getElementById('refreshBtn').hidden = true;
   $app.innerHTML = `<div class="login">
     <div class="hero">${cfg.logo ? `<img src="${attr(cfg.logo)}" alt="">` : ''}<div><h1>${esc(cfg.business_name || 'Daily Board')}</h1>${cfg.tagline ? `<div class="tagline">${esc(cfg.tagline)}</div>` : ''}</div></div>
     <p class="lead">${esc(cfg.welcome_text || "The team's shared screen: today's sales goals, the daily and weekly checklists, and announcements from management — every item signed off by whoever handled it.")}</p>
     ${err ? `<div class="notice warn">${esc(err)}</div>` : ''}
-    <div class="grid2">
-      <div class="panel">
-        <h2>Open the board</h2>
-        <form onsubmit="boardLogin(); return false">
-          <label>Board password</label>
-          <input class="inline" id="bl_pass" type="password" autocomplete="current-password" style="width:100%">
-          <div class="err" id="bl_err"></div>
-          <div style="margin-top:12px"><button class="small" type="submit">Open board</button></div>
-        </form>
-      </div>
-      <div class="panel">
-        <h2>Manager</h2>
-        <form onsubmit="managerLogin('ml'); return false">
-          <label>Manager PIN</label>
-          <input class="inline" id="ml_pin" type="password" inputmode="numeric" autocomplete="current-password" style="width:100%">
-          <div class="err" id="ml_err"></div>
-          <div style="margin-top:12px"><button class="small ghost" type="submit">Sign in as manager</button></div>
-        </form>
-        <p class="mini" style="margin:12px 0 0"><a href="sms.html">Text message policy &amp; opt-in</a></p>
-        ${cfg.board_pass_set === false ? `<p class="mini" style="margin:12px 0 0">First time here? Sign in with the manager PIN (default <b>1234</b>), then set a board password and change the PIN under Settings.</p>` : ''}
-      </div>
+    <div class="panel" style="max-width:420px">
+      <h2>Sign in</h2>
+      <form onsubmit="boardLogin(); return false">
+        <label>Password or PIN</label>
+        <input class="inline" id="bl_pass" type="password" autocomplete="current-password" style="width:100%">
+        <div class="err" id="bl_err"></div>
+        <div style="margin-top:12px"><button class="small" type="submit">Sign in</button></div>
+      </form>
+      <p class="mini" style="margin:12px 0 0"><a href="sms.html">Text message policy &amp; opt-in</a></p>
+      ${cfg.board_pass_set === false ? `<p class="mini" style="margin:12px 0 0">First time here? Sign in with the manager PIN (default <b>1234</b>), then set a board password and change the PIN under Settings.</p>` : ''}
     </div></div>`;
   document.getElementById('bl_pass').focus();
 }
+// One sign-in box: the code you type decides your access (manager PIN → manager, board password → board).
 window.boardLogin = async () => {
   const p = document.getElementById('bl_pass').value.trim();
   if (!p) return;
-  const out = await api('/api/login', { board_pass: p });
-  if (!out.token) { document.getElementById('bl_err').textContent = out.error || 'Wrong password.'; return; }
-  boardToken = out.token; localStorage.setItem('db_board_token', boardToken);
+  const out = await api('/api/login', { code: p });
+  if (!out.token) { document.getElementById('bl_err').textContent = out.error || 'Wrong password or PIN.'; return; }
+  if (out.role === 'manager') { mgrToken = out.token; localStorage.setItem('db_mgr_token', mgrToken); }
+  else { boardToken = out.token; localStorage.setItem('db_board_token', boardToken); }
   await loadBoard();
 };
 window.managerLogin = async prefix => {
@@ -156,17 +149,17 @@ window.managerLogin = async prefix => {
   if (!pin) return;
   const out = await api('/api/login', { manager_pin: pin });
   if (!out.token) { document.getElementById(`${prefix}_err`).textContent = out.error || 'Wrong PIN.'; return false; }
-  mgrToken = out.token; sessionStorage.setItem('db_mgr_token', mgrToken);
+  mgrToken = out.token; localStorage.setItem('db_mgr_token', mgrToken);
   if (prefix === 'ml') await loadBoard();
   return true;
 };
 window.boardLogout = () => {
   boardToken = ''; mgrToken = ''; data = null; mgr = null; viewDate = '';
-  localStorage.removeItem('db_board_token'); sessionStorage.removeItem('db_mgr_token');
+  localStorage.removeItem('db_board_token'); localStorage.removeItem('db_mgr_token');
   renderLogin();
 };
 window.managerLogout = async () => {
-  mgrToken = ''; mgr = null; sessionStorage.removeItem('db_mgr_token');
+  mgrToken = ''; mgr = null; localStorage.removeItem('db_mgr_token');
   if (!boardToken) return boardLogout();
   await loadBoard();
 };
@@ -180,14 +173,58 @@ function startTimers() {
     if (el) el.textContent = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: data?.timezone });
   }, 1000);
   // A board left open on the desk keeps itself current (unless someone is mid-dialog).
-  refreshTimer = setInterval(() => { if (!$modal.innerHTML && !mgr) loadBoard(); }, 60 * 1000);
+  refreshTimer = setInterval(() => refreshNow({ quiet: true }), 60 * 1000);
 }
 window.boardNav = async d => { viewDate = addDays(viewDate, d); await loadBoard(); };
 window.boardToday = async () => { viewDate = data.today; await loadBoard(); };
 
+// ---------- keeping the board current ----------
+// An installed app is frozen while it's in the background, so the 60-second timer above
+// can't catch up on its own: refresh the moment the app comes back, plus a Refresh button
+// and pull-down-to-refresh (an installed app has no browser reload button).
+function syncRefreshBtn() { const b = document.getElementById('refreshBtn'); if (b) b.hidden = !(data || mgr); }
+function showHint(text) {
+  let el = document.getElementById('refreshHint');
+  if (!el) { el = document.createElement('div'); el.id = 'refreshHint'; document.body.appendChild(el); }
+  el.textContent = text; el.classList.add('show');
+  clearTimeout(hintTimer); hintTimer = setTimeout(() => el.classList.remove('show'), 1800);
+}
+const typingInBoard = () => { const a = document.activeElement; return !!a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && $app.contains(a); };
+// quiet = automatic refresh: never interrupts a dialog, the manager panel, or someone typing.
+async function refreshNow(opts = {}) {
+  if (refreshing || (!boardToken && !mgrToken)) return;
+  if (opts.quiet && (mgr || $modal.innerHTML || typingInBoard() || Date.now() - lastLoad < 5000)) return;
+  refreshing = true;
+  const btn = document.getElementById('refreshBtn');
+  if (!opts.quiet && btn) btn.classList.add('spin');
+  let ok = true;
+  try {
+    await Promise.all([mgr ? reloadMgr() : loadBoard(), opts.quiet ? 0 : new Promise(r => setTimeout(r, 600))]);
+  } catch { ok = false; }
+  refreshing = false;
+  if (btn) btn.classList.remove('spin');
+  if (!opts.quiet) showHint(ok ? 'Updated' : "Couldn't reach the server");
+}
+window.refreshNow = refreshNow;
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refreshNow({ quiet: true }); });
+window.addEventListener('pageshow', e => { if (e.persisted) refreshNow({ quiet: true }); });
+window.addEventListener('online', () => refreshNow({ quiet: true }));
+// Pull down from the top of the page to refresh.
+let pullStart = null, pullDy = 0;
+document.addEventListener('touchstart', e => {
+  pullStart = window.scrollY <= 0 && e.touches.length === 1 && !$modal.innerHTML ? e.touches[0].clientY : null; pullDy = 0;
+}, { passive: true });
+document.addEventListener('touchmove', e => {
+  if (pullStart === null) return;
+  pullDy = e.touches[0].clientY - pullStart;
+  if (pullDy > 80) showHint('Release to refresh');
+}, { passive: true });
+document.addEventListener('touchend', () => { if (pullStart !== null && pullDy > 80) refreshNow(); pullStart = null; pullDy = 0; });
+document.addEventListener('touchcancel', () => { pullStart = null; pullDy = 0; });
+
 function render() {
   if (mgr) return renderManager();
-  startTimers();
+  startTimers(); syncRefreshBtn();
   document.getElementById('topRight').textContent = data.is_manager ? 'Manager' : '';
   const isToday = viewDate === data.today, isFuture = viewDate > data.today;
   const canSign = !isFuture;
@@ -575,14 +612,14 @@ window.mgrTabTo = t => { mgrTab = t; renderManager(); };
 window.setMgrName = v => { mgrName = v.trim(); localStorage.setItem('db_mgr_name', mgrName); };
 async function reloadMgr() {
   const out = await api('/api/manager/overview');
-  if (out.status === 401) { mgr = null; mgrToken = ''; sessionStorage.removeItem('db_mgr_token'); return loadBoard(); }
+  if (out.status === 401) { mgr = null; mgrToken = ''; localStorage.removeItem('db_mgr_token'); return loadBoard(); }
   if (!out.error) mgr = out;
   renderManager();
 }
 
 function renderManager() {
   const tabs = [['goals', 'Goals'], ['tasks', 'Tasks'], ['announcements', 'Announcements'], ['staff', 'Staff'], ['sms', 'Text-in'], ['activity', 'Activity'], ['evals', 'Evaluations'], ['branding', 'Branding'], ['settings', 'Settings']];
-  document.getElementById('topRight').textContent = 'Manager panel';
+  document.getElementById('topRight').textContent = 'Manager panel'; syncRefreshBtn();
   $app.innerHTML = `
     <div class="bar">
       <div class="date"><small>Manager panel</small>${esc(mgr.branding.business_name || 'Daily Board')}</div>
@@ -967,7 +1004,7 @@ window.saveSettings = async () => {
     timezone: g('st_tz'), board_pass: g('st_pass'), manager_pin: g('st_pin'), sms_number: g('st_num'), sms_default_kind: g('st_kind'), sms_reply: g('st_reply'), sms_notify: g('st_notify'), sms_broadcast: g('st_bcast'),
   });
   if (out.error) { document.getElementById('st_err').textContent = out.error; return; }
-  if (out.token) { mgrToken = out.token; sessionStorage.setItem('db_mgr_token', mgrToken); }
+  if (out.token) { mgrToken = out.token; localStorage.setItem('db_mgr_token', mgrToken); }
   // The board token was minted against the old password; drop it if the password changed.
   if (boardToken && g('st_pass') !== mgr.settings.board_pass) { boardToken = ''; localStorage.removeItem('db_board_token'); }
   await reloadMgr();

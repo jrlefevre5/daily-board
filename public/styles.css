@@ -223,3 +223,11 @@ pre.cmds { background: #f6f8fa; border: 1px solid var(--line); border-radius: 10
     .wrap { padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); padding-bottom: calc(60px + env(safe-area-inset-bottom)); }
   }
 }
+
+/* Refresh button (top bar) and its "Updated" / pull-to-refresh hint — the installed app has no browser reload button. */
+.refresh-btn { background: none; border: 0; color: var(--topbar-ink); font-size: 22px; line-height: 1; min-width: 44px; min-height: 44px; padding: 0; cursor: pointer; opacity: .85; }
+.refresh-btn[hidden] { display: none; }
+.refresh-btn.spin { animation: dbspin .8s linear infinite; }
+@keyframes dbspin { to { transform: rotate(360deg); } }
+#refreshHint { position: fixed; top: 8px; left: 50%; transform: translate(-50%, -16px); background: #111827; color: #fff; padding: 6px 14px; border-radius: 999px; font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; z-index: 100; }
+#refreshHint.show { opacity: .92; transform: translate(-50%, 0); }
