@@ -61,14 +61,14 @@ function recordFail(req) {
 
 // ---------- sign-in tokens ----------
 // Two roles: 'board' (the front-desk device, unlocked with the shared board
-// password, valid 30 days) and 'manager' (the manager PIN, valid 12 hours).
+// password) and 'manager' (the manager PIN). Both stay signed in for 30 days.
 // Tokens are HMAC-signed and carry a fingerprint of the password they were
 // minted with, so changing a password signs everyone out.
 const fingerprint = v => crypto.createHash('sha256').update(String(v)).digest('hex').slice(0, 12);
 async function makeToken(role) {
   const secret = await db.getSetting('token_secret', '');
   const pw = await db.getSetting(role === 'manager' ? 'manager_pin' : 'board_pass', '');
-  const payload = `${role}|${fingerprint(pw)}|${Date.now() + (role === 'manager' ? 12 : 24 * 30) * 3600 * 1000}`;
+  const payload = `${role}|${fingerprint(pw)}|${Date.now() + 24 * 30 * 3600 * 1000}`;
   const sig = crypto.createHmac('sha256', secret).update(payload).digest('hex');
   return Buffer.from(`${payload}|${sig}`).toString('base64url');
 }
@@ -126,10 +126,21 @@ app.get('/api/manifest', wrap(async (req, res) => {
   });
 }));
 
-// Sign in with either the board password or the manager PIN.
+// Sign in. The sign-in screen sends one `code`: the manager PIN signs in as a manager,
+// the board password as the board. (`manager_pin` / `board_pass` still work for the
+// "unlock manager" prompt on an already-open board.)
 app.post('/api/login', wrap(async (req, res) => {
   if (tooManyFails(req)) return res.status(429).json({ error: 'Too many failed attempts — try again in 10 minutes.' });
   const b = req.body || {};
+  if (b.code != null) {
+    const code = String(b.code).trim();
+    const pin = await db.getSetting('manager_pin', '');
+    const pass = (await db.getSetting('board_pass', '')).trim();
+    if (code && pin && safeEqual(code, pin)) return res.json({ ok: true, role: 'manager', token: await makeToken('manager') });
+    if (code && pass && safeEqual(code, pass)) return res.json({ ok: true, role: 'board', token: await makeToken('board') });
+    recordFail(req);
+    return res.status(401).json({ error: 'Wrong password or PIN.' });
+  }
   if (b.manager_pin != null) {
     const pin = await db.getSetting('manager_pin', '');
     if (pin && safeEqual(String(b.manager_pin).trim(), pin)) return res.json({ ok: true, role: 'manager', token: await makeToken('manager') });

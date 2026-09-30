@@ -25,8 +25,11 @@ password for the team and change the PIN.
 ## How it works
 
 **The board** (`/`) is meant to live on a tablet or PC at the front desk, opened
-once with the shared board password (it stays signed in for 30 days and
-refreshes itself every minute).
+once in the single sign-in box — the shared board password opens the board, the
+manager PIN opens it with manager access (either stays signed in for 30 days).
+It refreshes itself every minute and whenever the app comes back to the
+foreground; the ↻ button in the top bar (or pulling down from the top of the
+page) refreshes on demand.
 
 - **Sales goals** — recurring goals (e.g. *Units sold 25*, *Revenue $1,200*)
   copy onto every new day. Employees tap **+ Log**, pick their name, sign, and
@@ -133,7 +136,9 @@ its own home-screen icon, like any other app:
 
 The home-screen name follows Branding → business name. Updates arrive with
 every deploy — nothing to reinstall. The installed app keeps its own sign-in,
-separate from the browser, so sign in once inside it.
+separate from the browser, so sign in once inside it (it stays signed in for 30
+days, manager or not). It refreshes itself when you reopen it; use the ↻ button
+or pull down from the top to refresh on demand.
 
 ## Deploy (about five minutes, free tiers)
 
