@@ -62,37 +62,45 @@ function recordFail(req) {
 // ---------- sign-in tokens ----------
 // Two roles: 'board' (the front-desk device, unlocked with the shared board
 // password) and 'manager' (the manager PIN). Both stay signed in for 30 days.
+// A third kind, 'person', is an employee who typed their own PIN: board access plus
+// who they are (so announcements they see can be marked read for them).
 // Tokens are HMAC-signed and carry a fingerprint of the password they were
 // minted with, so changing a password signs everyone out.
 const fingerprint = v => crypto.createHash('sha256').update(String(v)).digest('hex').slice(0, 12);
-async function makeToken(role) {
+async function makeToken(role, staff) {
   const secret = await db.getSetting('token_secret', '');
-  const pw = await db.getSetting(role === 'manager' ? 'manager_pin' : 'board_pass', '');
-  const payload = `${role}|${fingerprint(pw)}|${Date.now() + 24 * 30 * 3600 * 1000}`;
+  const pw = role === 'person' ? staff.pin : await db.getSetting(role === 'manager' ? 'manager_pin' : 'board_pass', '');
+  const payload = `${role}|${fingerprint(pw)}|${Date.now() + 24 * 30 * 3600 * 1000}` + (role === 'person' ? `|${staff.id}` : '');
   const sig = crypto.createHmac('sha256', secret).update(payload).digest('hex');
   return Buffer.from(`${payload}|${sig}`).toString('base64url');
 }
-// The token's role, or null when missing / expired / forged / stale.
-async function readToken(header) {
+// {role, staffId} for a valid token, or null when missing / expired / forged / stale.
+// A person's token reads as the 'board' role, with their staffId alongside.
+async function readTokenFull(header) {
   try {
     const raw = Buffer.from(String(header || ''), 'base64url').toString();
     const i = raw.lastIndexOf('|');
     const payload = raw.slice(0, i), sig = raw.slice(i + 1);
-    const [role, fp, exp] = payload.split('|');
-    if (!['board', 'manager'].includes(role) || !(Number(exp) > Date.now())) return null;
+    const [role, fp, exp, sid] = payload.split('|');
+    if (!['board', 'manager', 'person'].includes(role) || !(Number(exp) > Date.now())) return null;
     const want = crypto.createHmac('sha256', await db.getSetting('token_secret', '')).update(payload).digest('hex');
     if (!safeEqual(sig, want)) return null;
+    if (role === 'person') {
+      const s = await one('SELECT id, pin FROM staff WHERE id = $1 AND active = 1', [Number(sid)]);
+      return s && s.pin && fingerprint(s.pin) === fp ? { role: 'board', staffId: s.id } : null; // PIN changed or person removed = signed out
+    }
     const pw = await db.getSetting(role === 'manager' ? 'manager_pin' : 'board_pass', '');
     if (role === 'board' && !pw) return null; // board password removed = board access removed
-    return fingerprint(pw) === fp ? role : null;
+    return fingerprint(pw) === fp ? { role, staffId: 0 } : null;
   } catch { return null; }
 }
+async function readToken(header) { const t = await readTokenFull(header); return t ? t.role : null; }
 async function roleOf(req) { return readToken(req.headers['x-token']); }
 
 function boardAuth(req, res, next) {
-  roleOf(req).then(role => {
-    if (!role) return res.status(401).json({ error: 'Please sign in.' });
-    req.role = role; next();
+  readTokenFull(req.headers['x-token']).then(t => {
+    if (!t) return res.status(401).json({ error: 'Please sign in.' });
+    req.role = t.role; req.staffId = t.staffId; next();
   }).catch(() => res.status(500).json({ error: 'Database unavailable.' }));
 }
 function managerOnly(req, res, next) {
@@ -127,7 +135,7 @@ app.get('/api/manifest', wrap(async (req, res) => {
 }));
 
 // Sign in. The sign-in screen sends one `code`: the manager PIN signs in as a manager,
-// the board password as the board. (`manager_pin` / `board_pass` still work for the
+// the board password as the board, an employee's PIN as that employee. (`manager_pin` / `board_pass` still work for the
 // "unlock manager" prompt on an already-open board.)
 app.post('/api/login', wrap(async (req, res) => {
   if (tooManyFails(req)) return res.status(429).json({ error: 'Too many failed attempts — try again in 10 minutes.' });
@@ -138,6 +146,11 @@ app.post('/api/login', wrap(async (req, res) => {
     const pass = (await db.getSetting('board_pass', '')).trim();
     if (code && pin && safeEqual(code, pin)) return res.json({ ok: true, role: 'manager', token: await makeToken('manager') });
     if (code && pass && safeEqual(code, pass)) return res.json({ ok: true, role: 'board', token: await makeToken('board') });
+    if (code) { // an employee's own PIN: opens the board as that person
+      const hits = (await q("SELECT id, name, pin FROM staff WHERE active = 1 AND pin <> ''")).filter(s => safeEqual(code, s.pin));
+      if (hits.length === 1) return res.json({ ok: true, role: 'person', name: hits[0].name, token: await makeToken('person', hits[0]) });
+      if (hits.length > 1) return res.status(401).json({ error: 'That PIN is used by more than one person — ask a manager for a new one.' });
+    }
     recordFail(req);
     return res.status(401).json({ error: 'Wrong password or PIN.' });
   }

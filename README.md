@@ -77,6 +77,27 @@ preview follows every change; the browser-tab icon follows the logo or accent
 color; text on the top bar and buttons flips to dark automatically on light
 colors. *Reset to defaults* puts it all back.
 
+## Personal PINs — who signed what
+
+Give every person a PIN under **Manager panel → Staff** (4–8 digits, unique;
+**Generate a PIN** picks a free one). Then turn on **Settings → Require employee
+PIN to sign**:
+
+- Signing off a task, logging goal progress, a peer evaluation, or undoing your
+  own sign-off asks for the person's **PIN** (plus a drawn or typed signature) —
+  no name list. The PIN picks the person; the board password and the manager PIN
+  can't sign anything. Marking an announcement read needs only the PIN.
+- Wrong PINs are rate-limited per device (12 misses, then a 10-minute wait).
+- Anyone can also type **their own PIN on the sign-in screen** to open the board
+  as themselves (e.g. on their phone's installed app). While signed in that way,
+  each announcement that has been on their screen for a couple of seconds is
+  marked read for them automatically — "Read by" fills in with no taps. The
+  shared front-desk board (signed in with the board password) keeps the
+  *I've read this* button, which asks for a PIN.
+- Changing a person's PIN, or removing them, signs them out everywhere.
+- The setting is off by default so nobody is locked out before everyone has a PIN.
+  PINs are stored as entered and never sent back to the browser.
+
 ## Post by text message
 
 Managers whose mobile number is on the roster can text the board's number. The

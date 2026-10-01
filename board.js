@@ -212,6 +212,15 @@ function e164(phone) {
 
 function mount(app, deps) {
   const { q, one, db, wrap, boardAuth, managerOnly, makeToken, safeEqual, recordFail, clientIp, baseUrl } = deps;
+  // Wrong-PIN guard for sign-offs: when a PIN picks the person, cap guessing per device (12 misses / 10 min).
+  const pinFails = new Map();
+  const pinLocked = req => { const r = pinFails.get(clientIp(req)); return !!r && r.count >= 12 && Date.now() - r.first < 10 * 60 * 1000; };
+  const pinMiss = req => {
+    const ip = clientIp(req), r = pinFails.get(ip);
+    if (!r || Date.now() - r.first > 10 * 60 * 1000) pinFails.set(ip, { count: 1, first: Date.now() }); else r.count++;
+    if (pinFails.size > 5000) pinFails.clear();
+  };
+  const requirePin = async () => (await db.getSetting('require_pin', '0')) === '1';
 
   // Text an announcement to everyone on the roster with a phone (skipping whoever texted it in).
   async function broadcastAnnouncement(ann, skipPhoneKey = '') {
@@ -316,6 +325,7 @@ function mount(app, deps) {
       today: todayStr, date, week_start: ws, week_end: addDays(ws, 6), timezone: settings.timezone || 'UTC',
       ...brand,
       sms_number: settings.sms_number || '', board_pass_set: !!(settings.board_pass || '').trim(),
+      require_pin: settings.require_pin === '1',   // true: signing needs the employee's own PIN (no name picker)
       staff: staff.map(s => ({ id: s.id, name: s.name, role: s.role, has_pin: !!s.pin })),
       goals: goals.map(g => ({ id: g.id, label: g.label, unit: g.unit, target: Number(g.target), baseline: g.baseline == null ? null : Number(g.baseline),
         actual: (byGoal[g.id] || []).reduce((s, e) => s + e.amount, 0), entries: byGoal[g.id] || [] })),
@@ -349,12 +359,21 @@ function mount(app, deps) {
     const already = await one('SELECT subject_name FROM peer_evals WHERE week = $1 AND evaluator_id = $2', [week, s.id]);
     res.json({ week, criteria: ev.criteria, already: already ? already.subject_name : null, options: await evalOptions(s.id, week, ev.repeat_weeks) });
   }));
+  // Same as the GET above, for when a PIN (not a name pick) says who the evaluator is.
+  app.post('/api/board/peer-eval/options', boardAuth, wrap(async (req, res) => {
+    const who = await resolveSigner(req.body || {}, req);
+    if (typeof who === 'string' || !who.staff_id) return res.status(400).json({ error: typeof who === 'string' ? who : 'Enter your PIN.' });
+    const ev = await evalSettings();
+    const week = weekStart(await today());
+    const already = await one('SELECT subject_name FROM peer_evals WHERE week = $1 AND evaluator_id = $2', [week, who.staff_id]);
+    res.json({ week, name: who.staff_name, criteria: ev.criteria, already: already ? already.subject_name : null, options: await evalOptions(who.staff_id, week, ev.repeat_weeks) });
+  }));
   app.post('/api/board/peer-eval', boardAuth, wrap(async (req, res) => {
     const b = req.body || {};
     const ev = await evalSettings();
     if (!ev.enabled) return res.status(400).json({ error: 'Peer evaluations are switched off.' });
     const week = weekStart(await today());
-    const who = await resolveSigner(b);
+    const who = await resolveSigner(b, req);
     if (typeof who === 'string' || !who.staff_id) { if (b.staff_id && b.pin) recordFail(req); return res.status(400).json({ error: typeof who === 'string' ? who : 'Pick your name from the list.' }); }
     const subject = await one('SELECT id, name FROM staff WHERE id = $1 AND active = 1', [Number(b.subject_id)]);
     if (!subject) return res.status(400).json({ error: 'Pick a teammate to evaluate.' });
@@ -384,16 +403,30 @@ function mount(app, deps) {
     const date = isDateStr(req.query.date) ? String(req.query.date) : await today();
     const data = await boardData(date);
     data.is_manager = req.role === 'manager';
+    // Someone signed in with their own PIN: the board knows who they are (announcements get marked read for them).
+    data.me = req.staffId ? (await one('SELECT id, name FROM staff WHERE id = $1 AND active = 1', [req.staffId])) || null : null;
     const ev = await evalSettings();
     data.peer_eval = { enabled: ev.enabled, week: weekStart(data.today), criteria: ev.criteria,
       done: ev.enabled ? (await q('SELECT evaluator_id FROM peer_evals WHERE week = $1', [weekStart(data.today)])).map(r => r.evaluator_id) : [] };
     res.json(data);
   }));
 
-  // Who is signing: a roster pick (with their PIN when they have one), or a
-  // typed name while the roster is still empty. Returns {staff_id, staff_name} or an error string.
-  async function resolveSigner(b) {
+  // Who is signing. With "Require employee PIN" on, the PIN alone picks the person (the board
+  // password and the manager PIN don't count). Otherwise: a roster pick (with their PIN when
+  // they have one), or a typed name while the roster is still empty.
+  // Returns {staff_id, staff_name} or an error string.
+  async function resolveSigner(b, req) {
     const roster = await q('SELECT * FROM staff WHERE active = 1');
+    if (await requirePin()) {
+      if (pinLocked(req)) return 'Too many wrong PINs from this device — wait 10 minutes, or ask a manager.';
+      const pin = String(b.pin || '').trim();
+      if (!pin) return 'Enter your PIN.';
+      const hits = roster.filter(s => s.pin && safeEqual(pin, s.pin));
+      if (hits.length === 1) return { staff_id: hits[0].id, staff_name: hits[0].name };
+      if (hits.length > 1) return 'That PIN is used by more than one person — ask a manager to give you a new one.';
+      pinMiss(req);
+      return 'Wrong PIN.';
+    }
     if (b.staff_id) {
       const s = roster.find(r => r.id === Number(b.staff_id));
       if (!s) return 'Pick your name from the list.';
@@ -420,9 +453,10 @@ function mount(app, deps) {
     const todayStr = await today();
     const date = isDateStr(b.date) ? String(b.date) : todayStr;
     if (date > todayStr) return res.status(400).json({ error: "You can't sign off a future day." });
-    const who = await resolveSigner(b);
+    const who = await resolveSigner(b, req);
     if (typeof who === 'string') { if (b.staff_id && b.pin) recordFail(req); return res.status(400).json({ error: who }); }
-    const sig = readSignature(b);
+    // A read receipt needs only the PIN when PINs are required; everything else also needs a signature.
+    const sig = readSignature(b) || (b.kind === 'announcement' && await requirePin() ? { signature: '', signature_kind: 'pin' } : null);
     if (!sig) return res.status(400).json({ error: 'Add your signature (draw it or type your name).' });
     const ip = clientIp(req), note = clean(b.note, 500), id = Number(b.id);
     if (b.kind === 'task') {
@@ -474,12 +508,30 @@ function mount(app, deps) {
     res.status(400).json({ error: 'Unknown sign-off kind.' });
   }));
 
+  // Mark announcements read for the person signed in with their own PIN (the board calls this
+  // once an announcement has been on their screen for a couple of seconds).
+  app.post('/api/board/read', boardAuth, wrap(async (req, res) => {
+    const me = req.staffId ? await one('SELECT id, name FROM staff WHERE id = $1 AND active = 1', [req.staffId]) : null;
+    if (!me) return res.status(403).json({ error: 'Sign in with your own PIN to be marked as read.' });
+    const ids = (Array.isArray((req.body || {}).ids) ? req.body.ids : []).map(Number).filter(n => Number.isInteger(n) && n > 0).slice(0, 50);
+    for (const id of ids)
+      await q(`INSERT INTO announcement_acks (announcement_id, staff_id, staff_name, signature, signature_kind, signed_ip)
+        SELECT n.id, $2::int, $3::text, '', 'auto', $4::text FROM announcements n WHERE n.id = $1 AND n.active = 1
+        ON CONFLICT (announcement_id, LOWER(staff_name)) DO NOTHING`, [id, me.id, me.name, clientIp(req)]);
+    res.json({ ok: true, name: me.name });
+  }));
+
   // Undo a task sign-off: the person who signed it (with their PIN if they have one) or a manager.
   app.post('/api/board/unsign', boardAuth, wrap(async (req, res) => {
     const b = req.body || {};
     const c = await one('SELECT * FROM task_completions WHERE id = $1', [Number(b.completion_id)]);
     if (!c) return res.json({ ok: true });
-    if (req.role !== 'manager') {
+    if (req.role !== 'manager' && await requirePin()) {
+      // PINs are required: the PIN says who is asking, and it has to be the person who signed.
+      const who = await resolveSigner(b, req);
+      if (typeof who === 'string') return res.status(403).json({ error: who });
+      if (!c.staff_id || who.staff_id !== c.staff_id) return res.status(403).json({ error: `Only ${c.staff_name} or a manager can clear this sign-off.` });
+    } else if (req.role !== 'manager') {
       const s = c.staff_id ? await one('SELECT * FROM staff WHERE id = $1', [c.staff_id]) : null;
       if (!s || Number(b.staff_id) !== s.id) return res.status(403).json({ error: `Only ${c.staff_name} or a manager can clear this sign-off.` });
       if (s.pin && !safeEqual(String(b.pin || '').trim(), s.pin)) { recordFail(req); return res.status(403).json({ error: 'Wrong PIN.' }); }
@@ -492,7 +544,7 @@ function mount(app, deps) {
   app.get('/api/manager/overview', managerOnly, wrap(async (req, res) => {
     const todayStr = await today();
     const [staff, goal_templates, goals, goal_schedule, tasks, announcements, sms_log, completions, entries] = await Promise.all([
-      q('SELECT id, name, phone, role, active, created_at, sms_consent_at, (pin <> \'\') AS has_pin FROM staff ORDER BY active DESC, name'),
+      q('SELECT id, name, phone, role, active, created_at, sms_consent_at, pin FROM staff ORDER BY active DESC, name'),
       q('SELECT * FROM goal_templates ORDER BY active DESC, sort, id'),
       q('SELECT * FROM goals WHERE date >= $1 ORDER BY date, sort, id', [addDays(todayStr, -1)]),
       q(`SELECT template_id, COUNT(*)::int AS days, MIN(date) AS from_date, MAX(date) AS to_date,
@@ -507,20 +559,25 @@ function mount(app, deps) {
          FROM goal_entries e JOIN goals g ON g.id = e.goal_id
          WHERE e.created_at > now() - interval '30 days' ORDER BY e.created_at DESC LIMIT 500`),
     ]);
+    // PINs never leave the server: the panel only learns who has one, and whether two people share one.
     const s = await db.getAllSettings();
+    const pinCount = {}, reserved = new Set([s.manager_pin || '', (s.board_pass || '').trim()]);
+    for (const p of staff) if (p.active && p.pin) pinCount[p.pin] = (pinCount[p.pin] || 0) + 1;
+    const staffOut = staff.map(({ pin, ...p }) => ({ ...p, has_pin: !!pin, pin_shared: !!(p.active && pin && (pinCount[pin] > 1 || reserved.has(pin))) }));
+    const pin_issues = { missing: staffOut.filter(p => p.active && !p.has_pin).length, shared: staffOut.filter(p => p.pin_shared).length };
     const ev = await evalSettings();
     const peer_evals = (await q(`SELECT id, week, evaluator_id, evaluator_name, subject_id, subject_name, scores, strengths, improve, signature_kind, created_at
       FROM peer_evals WHERE week >= $1 ORDER BY week DESC, created_at DESC`, [addDays(weekStart(todayStr), -7 * 12)]))
       .map(e => { let sc = {}; try { sc = JSON.parse(e.scores); } catch {} return { ...e, scores: sc }; });
     res.json({
-      today: todayStr, staff, peer_evals, eval_settings: ev,
+      today: todayStr, staff: staffOut, pin_issues, peer_evals, eval_settings: ev,
       goal_templates: goal_templates.map(t => ({ ...t, target: Number(t.target) })),
       goals: goals.map(g => ({ ...g, target: Number(g.target), baseline: g.baseline == null ? null : Number(g.baseline) })),
       goal_schedule, tasks, announcements, sms_log, completions, goal_entries: entries,
       branding: await db.branding(),
       settings: {
         timezone: s.timezone || '',
-        board_pass: s.board_pass || '', manager_pin: s.manager_pin || '',
+        board_pass: s.board_pass || '', manager_pin: s.manager_pin || '', require_pin: s.require_pin === '1',
         sms_number: s.sms_number || '', sms_default_kind: s.sms_default_kind || 'announcement', sms_reply: s.sms_reply !== '0',
         sms_secured: !!(process.env.TWILIO_AUTH_TOKEN || process.env.SMS_WEBHOOK_SECRET),
         sms_outbound: smsOutboundReady(), sms_notify: (s.sms_notify || '1') !== '0', sms_broadcast: s.sms_broadcast === '1',
@@ -528,6 +585,16 @@ function mount(app, deps) {
     });
   }));
 
+  // A random 6-digit PIN nobody uses yet (and that isn't the manager PIN or board password).
+  app.get('/api/manager/staff/new-pin', managerOnly, wrap(async (req, res) => {
+    const taken = new Set((await q("SELECT pin FROM staff WHERE pin <> ''")).map(r => r.pin));
+    taken.add(await db.getSetting('manager_pin', '')); taken.add((await db.getSetting('board_pass', '')).trim());
+    for (let i = 0; i < 100; i++) {
+      const pin = String(crypto.randomInt(100000, 1000000));
+      if (!taken.has(pin)) return res.json({ pin });
+    }
+    res.status(500).json({ error: 'Could not find a free PIN — try again.' });
+  }));
   app.post('/api/manager/staff', managerOnly, wrap(async (req, res) => {
     const b = req.body || {};
     if (b.remove) { await q('DELETE FROM staff WHERE id = $1', [Number(b.id)]); return res.json({ ok: true }); }
@@ -537,6 +604,14 @@ function mount(app, deps) {
     const phone = clean(b.phone, 30), active = isOff(b.active) ? 0 : 1;
     if (b.pin != null && String(b.pin).trim() && !/^\d{4,8}$/.test(String(b.pin).trim()))
       return res.status(400).json({ error: 'PIN must be 4–8 digits.' });
+    // A PIN picks the person, so each one is unique — and never the manager PIN or board password.
+    const newPin = b.pin == null ? '' : String(b.pin).trim();
+    if (newPin) {
+      if (await one('SELECT 1 AS x FROM staff WHERE pin = $1 AND id <> $2', [newPin, Number(b.id) || 0]))
+        return res.status(400).json({ error: 'Someone else already has that PIN — pick a different one (or use Generate).' });
+      if (newPin === (await db.getSetting('manager_pin', '')) || newPin === (await db.getSetting('board_pass', '')).trim())
+        return res.status(400).json({ error: "That PIN can't be used — pick a different one (or use Generate)." });
+    }
     if (b.id) {
       const cur = await one('SELECT * FROM staff WHERE id = $1', [Number(b.id)]);
       if (!cur) return res.status(404).json({ error: 'Not found.' });
@@ -737,6 +812,11 @@ function mount(app, deps) {
       if (p.length < 4) return res.status(400).json({ error: 'Manager PIN must be at least 4 characters.' });
       out.manager_pin = p;
     }
+    // Neither may match an employee's PIN (a PIN picks the person).
+    for (const k of ['board_pass', 'manager_pin'])
+      if (out[k] && out[k] !== (await db.getSetting(k, '')).trim() && await one('SELECT 1 AS x FROM staff WHERE pin = $1', [out[k]]))
+        return res.status(400).json({ error: `That ${k === 'board_pass' ? 'board password' : 'manager PIN'} matches an employee's PIN — pick something different.` });
+    if (b.require_pin != null) out.require_pin = isOff(b.require_pin) ? '0' : '1';
     if (b.sms_number != null) out.sms_number = clean(b.sms_number, 40);
     if (b.sms_default_kind != null) out.sms_default_kind = b.sms_default_kind === 'task' ? 'task' : 'announcement';
     if (b.sms_reply != null) out.sms_reply = isOff(b.sms_reply) ? '0' : '1';
