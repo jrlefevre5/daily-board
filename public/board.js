@@ -289,13 +289,25 @@ let evalScores = {};
 window.openEval = staffId => {
   evalScores = {};
   const pe = data.peer_eval;
+  // PINs required: step one is just the PIN; step two says who is evaluating and has the form.
+  if (data.require_pin && !signPin) {
+    $modal.innerHTML = `<div class="modal-back" onclick="if(event.target===this)closeModal()"><div class="modal">
+      <h3>Peer evaluation</h3><p class="sub">Week of ${esc(fmtShort(pe.week))}. Honest and specific helps most — managers read these, teammates don't.</p>
+      <form onsubmit="evalContinue(); return false">
+        ${staffPicker('ev')}
+        <div class="err" id="ev_err"></div>
+        <div class="row"><button type="button" class="small ghost" onclick="closeModal()">Cancel</button><button type="submit" class="small green" id="ev_go">Continue</button></div>
+      </form>
+    </div></div>`;
+    document.getElementById('ev_pin').focus();
+    return;
+  }
   $modal.innerHTML = `<div class="modal-back" onclick="if(event.target===this)closeModal()"><div class="modal" style="max-width:600px">
     <h3>Peer evaluation</h3><p class="sub">Week of ${esc(fmtShort(pe.week))}. Honest and specific helps most — managers read these, teammates don't.</p>
-    ${staffPicker('ev', data.staff.filter(s => !pe.done.includes(s.id)).map(s => s.id), staffId)}
-    ${data.require_pin ? '<div style="margin-top:8px"><button type="button" class="small" onclick="evalLoad()">Continue</button></div>' : ''}
+    ${data.require_pin ? `<div class="notice" style="margin:0 0 4px">Evaluating as <b>${esc(signWho)}</b> · <a href="#" onclick="evalBack(); return false">not you?</a></div>` : staffPicker('ev', data.staff.filter(s => !pe.done.includes(s.id)).map(s => s.id), staffId)}
     <div id="ev_notice"></div>
     <label>Who are you evaluating?</label>
-    <select class="inline" id="ev_subject"><option value="">${data.require_pin ? 'Enter your PIN first…' : 'Pick your name first…'}</option></select>
+    <select class="inline" id="ev_subject"><option value="">${data.require_pin ? 'Loading…' : 'Pick your name first…'}</option></select>
     <div id="ev_form" style="display:none">
       ${pe.criteria.map((c, i) => `<div class="crit"><span>${esc(c)}</span><div class="rate" data-c="${attr(c)}">${[1, 2, 3, 4, 5].map(v => `<button type="button" onclick="rate(this, ${v})">${v}</button>`).join('')}</div></div>`).join('')}
       <div class="mini" style="margin:4px 0 0">1 = needs work · 3 = solid · 5 = outstanding</div>
@@ -308,15 +320,29 @@ window.openEval = staffId => {
     <div class="row"><button class="small ghost" onclick="closeModal()">Cancel</button><button class="small green" id="ev_go" onclick="submitEval()" disabled>Submit evaluation</button></div>
   </div></div>`;
   onStaffPick('ev');
-  if (data.require_pin) { document.getElementById('ev_pin').focus(); return; }
+  if (data.require_pin) { evalLoad(); return; }
   document.getElementById('ev_staff').addEventListener('change', evalLoad);
   if (staffId) evalLoad();
 };
+// Step one done: the server says whose PIN that is; on to the evaluation form.
+window.evalContinue = async () => {
+  const err = document.getElementById('ev_err'), go = document.getElementById('ev_go');
+  const pin = ((document.getElementById('ev_pin') || {}).value || '').trim();
+  if (!pin) { err.textContent = 'Enter your PIN.'; return; }
+  go.disabled = true; err.textContent = '';
+  const out = await api('/api/board/peer-eval/options', { pin });
+  go.disabled = false;
+  if (out.error) { err.textContent = out.error; document.getElementById('ev_pin').select(); return; }
+  if (out.already) { err.textContent = `${out.name}, you've already submitted this week's evaluation (${out.already}). Thanks!`; return; }
+  signPin = pin; signWho = out.name;
+  openEval(0);
+};
+window.evalBack = () => { signPin = ''; signWho = ''; openEval(0); };
 window.evalLoad = evalLoad;
 async function evalLoad() {
   const sel = document.getElementById('ev_staff'), sub = document.getElementById('ev_subject'), form = document.getElementById('ev_form'), notice = document.getElementById('ev_notice');
-  const id = sel ? Number(sel.value) : 0, pin = sel ? '' : (document.getElementById('ev_pin') || {}).value || '';
-  sub.innerHTML = `<option value="">${sel ? 'Pick your name first…' : 'Enter your PIN first…'}</option>`; form.style.display = 'none'; notice.innerHTML = ''; document.getElementById('ev_go').disabled = true;
+  const id = sel ? Number(sel.value) : 0, pin = sel ? '' : signPin;
+  sub.innerHTML = `<option value="">${sel ? 'Pick your name first…' : 'Loading…'}</option>`; form.style.display = 'none'; notice.innerHTML = ''; document.getElementById('ev_go').disabled = true;
   if (sel ? !id : !pin.trim()) return;
   const out = sel ? await api('/api/board/peer-eval/options?staff_id=' + id) : await api('/api/board/peer-eval/options', { pin });
   if (out.error) { notice.innerHTML = `<div class="notice warn">${esc(out.error)}</div>`; return; }
@@ -334,6 +360,7 @@ window.submitEval = async () => {
   const err = document.getElementById('ev_err'), go = document.getElementById('ev_go');
   const body = { ...signerFields('ev'), subject_id: Number(document.getElementById('ev_subject').value), scores: evalScores,
     strengths: document.getElementById('ev_strengths').value.trim(), improve: document.getElementById('ev_improve').value.trim(), signature: readSignature() };
+  if (signPin) body.pin = signPin;   // typed in step one
   if (!body.subject_id) { err.textContent = 'Choose a teammate to evaluate.'; return; }
   for (const c of data.peer_eval.criteria) if (!evalScores[c]) { err.textContent = `Rate "${c}" first.`; return; }
   if (!body.signature) { err.textContent = 'Add your signature.'; return; }
