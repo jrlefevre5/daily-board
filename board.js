@@ -447,6 +447,30 @@ function mount(app, deps) {
     return { signature: sig.slice(0, 120), signature_kind: 'typed' };
   }
 
+  // Step one of signing when PINs are required: whose PIN is this, and can they sign this task?
+  // (The final /api/board/sign call checks the PIN again.)
+  app.post('/api/board/whoami', boardAuth, wrap(async (req, res) => {
+    const b = req.body || {};
+    const who = await resolveSigner(b, req);
+    if (typeof who === 'string' || !who.staff_id) return res.status(400).json({ error: typeof who === 'string' ? who : 'Enter your PIN.' });
+    if (b.kind === 'task') {
+      const t = await one('SELECT * FROM tasks WHERE id = $1 AND active = 1', [Number(b.id)]);
+      if (!t) return res.status(404).json({ error: 'That task is no longer on the board.' });
+      const date = isDateStr(b.date) ? String(b.date) : await today();
+      const period = t.kind === 'weekly' ? weekStart(date) : t.kind === 'once' ? t.due_date : date;
+      if (t.assign === 'each') {
+        const assignees = parseIds(t.assignees);
+        const required = assignees.length ? assignees : (await q('SELECT id FROM staff WHERE active = 1')).map(s => s.id);
+        if (!required.includes(who.staff_id)) return res.status(403).json({ error: `${who.staff_name} isn't on this task.` });
+        if (await one('SELECT 1 AS x FROM task_completions WHERE task_id = $1 AND period = $2 AND staff_id = $3', [t.id, period, who.staff_id]))
+          return res.status(409).json({ error: `${who.staff_name} already signed this off.` });
+      } else if (await one('SELECT 1 AS x FROM task_completions WHERE task_id = $1 AND period = $2', [t.id, period])) {
+        return res.status(409).json({ error: 'Someone already signed this off — refresh the board.' });
+      }
+    }
+    res.json({ ok: true, name: who.staff_name });
+  }));
+
   // Sign off a task, acknowledge an announcement, or log progress toward a goal.
   app.post('/api/board/sign', boardAuth, wrap(async (req, res) => {
     const b = req.body || {};

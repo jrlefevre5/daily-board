@@ -83,10 +83,13 @@ Give every person a PIN under **Manager panel → Staff** (4–8 digits, unique;
 **Generate a PIN** picks a free one). Then turn on **Settings → Require employee
 PIN to sign**:
 
-- Signing off a task, logging goal progress, a peer evaluation, or undoing your
-  own sign-off asks for the person's **PIN** (plus a drawn or typed signature) —
-  no name list. The PIN picks the person; the board password and the manager PIN
-  can't sign anything. Marking an announcement read needs only the PIN.
+- Signing off a task or logging goal progress is two steps: type your **PIN**,
+  then a screen that says who is signing, with the note, your drawn or typed
+  signature, and a Confirm button. No name list — the PIN picks the person (a
+  wrong PIN, or someone not on the task, is caught on the first screen). The
+  board password and the manager PIN can't sign anything. Peer evaluations and
+  undoing your own sign-off also use your PIN; marking an announcement read
+  needs only the PIN.
 - Wrong PINs are rate-limited per device (12 misses, then a 10-minute wait).
 - Anyone can also type **their own PIN on the sign-in screen** to open the board
   as themselves (e.g. on their phone's installed app). While signed in that way,
