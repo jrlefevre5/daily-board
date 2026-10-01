@@ -468,7 +468,8 @@ function eachRow(canSign, t) {
 
 // ---------- sign-off dialog with signature pad ----------
 let padState = null; // { canvas, ctx, drawn, w, h }
-function closeModal() { $modal.innerHTML = ''; padState = null; }
+let signPin = '', signWho = '';   // PIN-required sign-offs: step one's PIN and the name it belongs to, held only while the dialog is open
+function closeModal() { $modal.innerHTML = ''; padState = null; signPin = ''; signWho = ''; }
 window.closeModal = closeModal;
 
 function staffPicker(id, allowed, preselect) {
@@ -523,9 +524,23 @@ window.openSign = (kind, id, staffId = 0) => {
       </div>
       <label>Note (optional)</label><input class="inline" id="sg_note" placeholder="e.g. what was sold, to whom" maxlength="500">`;
   }
+  // PINs required: step one is just the PIN; step two recaps who is signing and takes the note + signature.
+  const twoStep = data.require_pin && kind !== 'announcement';
+  if (twoStep && !signPin) {
+    $modal.innerHTML = `<div class="modal-back" onclick="if(event.target===this)closeModal()"><div class="modal">
+      <h3>${esc(title)}</h3><p class="sub">${esc(sub)}</p>
+      <form onsubmit="signContinue('${kind}', ${id}); return false">
+        ${staffPicker('sg', allowed, staffId)}
+        <div class="err" id="sg_err"></div>
+        <div class="row"><button type="button" class="small ghost" onclick="closeModal()">Cancel</button><button type="submit" class="small green" id="sg_go">Continue</button></div>
+      </form>
+    </div></div>`;
+    document.getElementById('sg_pin').focus();
+    return;
+  }
   $modal.innerHTML = `<div class="modal-back" onclick="if(event.target===this)closeModal()"><div class="modal">
     <h3>${esc(title)}</h3><p class="sub">${esc(sub)}</p>
-    ${staffPicker('sg', allowed, staffId)}
+    ${twoStep ? `<div class="notice" style="margin:0 0 4px">Signing as <b>${esc(signWho)}</b> · <a href="#" onclick="signBack('${kind}', ${id}); return false">not you?</a></div>` : staffPicker('sg', allowed, staffId)}
     ${extra}
     ${noSig ? '' : `<label>Signature</label>${padHtml()}`}
     <div class="err" id="sg_err"></div>
@@ -533,9 +548,22 @@ window.openSign = (kind, id, staffId = 0) => {
   </div></div>`;
   onStaffPick('sg');
   if (!noSig) initPad(document.getElementById('sg_pad'));
-  const first = document.getElementById('sg_amount') || document.getElementById('sg_name') || document.getElementById('sg_pin');
+  const first = document.getElementById('sg_amount') || document.getElementById('sg_name') || document.getElementById('sg_pin') || document.getElementById('sg_note');
   if (first) first.focus();
 };
+// Step one done: the server says whose PIN that is (and whether they can sign this); on to the recap screen.
+window.signContinue = async (kind, id) => {
+  const err = document.getElementById('sg_err'), go = document.getElementById('sg_go');
+  const pin = ((document.getElementById('sg_pin') || {}).value || '').trim();
+  if (!pin) { err.textContent = 'Enter your PIN.'; return; }
+  go.disabled = true; err.textContent = '';
+  const out = await api('/api/board/whoami', { pin, kind, id, date: viewDate });
+  go.disabled = false;
+  if (out.error) { err.textContent = out.error; document.getElementById('sg_pin').select(); return; }
+  signPin = pin; signWho = out.name;
+  openSign(kind, id);
+};
+window.signBack = (kind, id) => { signPin = ''; signWho = ''; openSign(kind, id); };
 
 function padHtml() {
   return `<div id="sg_padwrap">
@@ -603,6 +631,7 @@ window.submitSign = async (kind, id) => {
   const signature = noSig ? '' : readSignature();
   if (!noSig && !signature) { err.textContent = 'Add your signature first.'; return; }
   const body = { kind, id, date: viewDate, signature, ...signerFields('sg') };
+  if (signPin) body.pin = signPin;   // typed in step one
   if (data.require_pin) { if (!body.pin) { err.textContent = 'Enter your PIN.'; return; } }
   else if (data.staff.length && !body.staff_id) { err.textContent = 'Pick your name.'; return; }
   const noteEl = document.getElementById('sg_note'); if (noteEl) body.note = noteEl.value.trim();
