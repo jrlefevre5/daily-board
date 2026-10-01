@@ -225,7 +225,7 @@ document.addEventListener('touchcancel', () => { pullStart = null; pullDy = 0; }
 function render() {
   if (mgr) return renderManager();
   startTimers(); syncRefreshBtn();
-  document.getElementById('topRight').textContent = data.is_manager ? 'Manager' : '';
+  document.getElementById('topRight').textContent = data.is_manager ? 'Manager' : data.me ? data.me.name : '';
   const isToday = viewDate === data.today, isFuture = viewDate > data.today;
   const canSign = !isFuture;
   const goalsDone = data.goals.filter(g => g.target > 0 && g.actual >= g.target).length;
@@ -268,6 +268,7 @@ function render() {
     </div>
     ${evalPanel(canSign && isToday)}
     ${data.sms_number ? `<p class="mini" style="text-align:center">Managers: text <b>${esc(data.sms_number)}</b> to post — start with ANNOUNCE, TASK, DAILY, WEEKLY, or GOAL (or HELP).</p>` : ''}`;
+  watchAnnouncements();
 }
 
 // ---------- peer evaluations ----------
@@ -291,9 +292,10 @@ window.openEval = staffId => {
   $modal.innerHTML = `<div class="modal-back" onclick="if(event.target===this)closeModal()"><div class="modal" style="max-width:600px">
     <h3>Peer evaluation</h3><p class="sub">Week of ${esc(fmtShort(pe.week))}. Honest and specific helps most — managers read these, teammates don't.</p>
     ${staffPicker('ev', data.staff.filter(s => !pe.done.includes(s.id)).map(s => s.id), staffId)}
+    ${data.require_pin ? '<div style="margin-top:8px"><button type="button" class="small" onclick="evalLoad()">Continue</button></div>' : ''}
     <div id="ev_notice"></div>
     <label>Who are you evaluating?</label>
-    <select class="inline" id="ev_subject"><option value="">Pick your name first…</option></select>
+    <select class="inline" id="ev_subject"><option value="">${data.require_pin ? 'Enter your PIN first…' : 'Pick your name first…'}</option></select>
     <div id="ev_form" style="display:none">
       ${pe.criteria.map((c, i) => `<div class="crit"><span>${esc(c)}</span><div class="rate" data-c="${attr(c)}">${[1, 2, 3, 4, 5].map(v => `<button type="button" onclick="rate(this, ${v})">${v}</button>`).join('')}</div></div>`).join('')}
       <div class="mini" style="margin:4px 0 0">1 = needs work · 3 = solid · 5 = outstanding</div>
@@ -306,15 +308,17 @@ window.openEval = staffId => {
     <div class="row"><button class="small ghost" onclick="closeModal()">Cancel</button><button class="small green" id="ev_go" onclick="submitEval()" disabled>Submit evaluation</button></div>
   </div></div>`;
   onStaffPick('ev');
+  if (data.require_pin) { document.getElementById('ev_pin').focus(); return; }
   document.getElementById('ev_staff').addEventListener('change', evalLoad);
   if (staffId) evalLoad();
 };
+window.evalLoad = evalLoad;
 async function evalLoad() {
   const sel = document.getElementById('ev_staff'), sub = document.getElementById('ev_subject'), form = document.getElementById('ev_form'), notice = document.getElementById('ev_notice');
-  const id = Number(sel.value);
-  sub.innerHTML = '<option value="">Pick your name first…</option>'; form.style.display = 'none'; notice.innerHTML = ''; document.getElementById('ev_go').disabled = true;
-  if (!id) return;
-  const out = await api('/api/board/peer-eval/options?staff_id=' + id);
+  const id = sel ? Number(sel.value) : 0, pin = sel ? '' : (document.getElementById('ev_pin') || {}).value || '';
+  sub.innerHTML = `<option value="">${sel ? 'Pick your name first…' : 'Enter your PIN first…'}</option>`; form.style.display = 'none'; notice.innerHTML = ''; document.getElementById('ev_go').disabled = true;
+  if (sel ? !id : !pin.trim()) return;
+  const out = sel ? await api('/api/board/peer-eval/options?staff_id=' + id) : await api('/api/board/peer-eval/options', { pin });
   if (out.error) { notice.innerHTML = `<div class="notice warn">${esc(out.error)}</div>`; return; }
   if (out.already) { notice.innerHTML = `<div class="notice">You've already submitted this week's evaluation (${esc(out.already)}). Thanks!</div>`; return; }
   sub.innerHTML = '<option value="">Choose a teammate…</option>' + out.options.map(o => `<option value="${o.id}" ${o.recent ? 'disabled' : ''}>${esc(o.name)}${o.recent ? ' — rated recently, pick someone else' : ''}</option>`).join('');
@@ -357,7 +361,8 @@ const goalCard = canSign => g => {
   </div>`;
 };
 
-const annCard = canSign => a => `<div class="ann ${a.pinned ? 'pinned' : ''}">
+const readByHtml = a => a.acks.length ? `<b>Read by:</b> ${a.acks.map(x => esc(x.staff_name)).join(', ')}` : '';
+const annCard = canSign => a => `<div class="ann ${a.pinned ? 'pinned' : ''}" data-ann="${a.id}">
   <div class="head">
     ${a.pinned ? '<span class="chip pin">Pinned</span>' : ''}
     ${a.title ? `<span class="title">${esc(a.title)}</span>` : ''}
@@ -367,10 +372,47 @@ const annCard = canSign => a => `<div class="ann ${a.pinned ? 'pinned' : ''}">
   ${a.media_url ? `<a href="${attr(a.media_url)}" target="_blank" rel="noopener"><img class="media" src="${attr(a.media_url)}" alt="" loading="lazy" onerror="this.style.display='none'"></a>` : ''}
   <div class="foot">
     <span>${esc(a.created_by || 'Management')} · ${esc(fmtStamp(a.created_at))}${a.expires_on ? ` · until ${esc(fmtShort(a.expires_on))}` : ''}</span>
-    <span class="acks">${a.acks.length ? `<b>Read by:</b> ${a.acks.map(x => esc(x.staff_name)).join(', ')}` : ''}</span>
-    ${canSign ? `<button class="mini-btn" onclick="openSign('announcement', ${a.id})">✓ I've read this</button>` : ''}
+    <span class="acks">${readByHtml(a)}</span>
+    ${canSign && !data.me ? `<button class="mini-btn" onclick="openSign('announcement', ${a.id})">✓ I've read this</button>` : ''}
   </div>
 </div>`;
+
+// Someone signed in with their own PIN needn't tap anything: an announcement that has been on
+// their screen for a couple of seconds is marked read for them.
+let annObserver = null, annQueue = new Set(), annFlush = null;
+const annTimers = new Map();
+function watchAnnouncements() {
+  if (annObserver) annObserver.disconnect();
+  for (const t of annTimers.values()) clearTimeout(t);
+  annTimers.clear();
+  if (!data.me || !('IntersectionObserver' in window)) return;
+  const meName = String(data.me.name).toLowerCase();
+  const todo = new Set(data.announcements.filter(a => !a.acks.some(x => String(x.staff_name).toLowerCase() === meName)).map(a => a.id));
+  if (!todo.size) return;
+  annObserver = new IntersectionObserver(entries => {
+    for (const e of entries) {
+      const id = Number(e.target.dataset.ann);
+      const seen = e.isIntersecting && (e.intersectionRatio >= 0.5 || e.intersectionRect.height >= window.innerHeight * 0.4);
+      if (seen && !annTimers.has(id)) annTimers.set(id, setTimeout(() => { annTimers.delete(id); if (document.visibilityState === 'visible') markRead(id); }, 2000));
+      else if (!seen && annTimers.has(id)) { clearTimeout(annTimers.get(id)); annTimers.delete(id); }
+    }
+  }, { threshold: [0, 0.25, 0.5, 0.75, 1] });
+  for (const el of $app.querySelectorAll('.ann[data-ann]')) if (todo.has(Number(el.dataset.ann))) annObserver.observe(el);
+}
+function markRead(id) {
+  annQueue.add(id); clearTimeout(annFlush);
+  annFlush = setTimeout(async () => {
+    const ids = [...annQueue]; annQueue = new Set();
+    const out = await api('/api/board/read', { ids });
+    if (out.error || !data || !data.me) return;
+    for (const a of data.announcements) {
+      if (!ids.includes(a.id)) continue;
+      if (!a.acks.some(x => x.staff_name === data.me.name)) a.acks.push({ staff_name: data.me.name, signed_at: new Date().toISOString() });
+      const card = $app.querySelector(`.ann[data-ann="${a.id}"]`);
+      if (card) { card.querySelector('.acks').innerHTML = readByHtml(a); if (annObserver) annObserver.unobserve(card); }
+    }
+  }, 400);
+}
 
 // Who a task is for, as a chip. Per-person tasks with one name behave like a normal row locked to that person.
 function whoChip(t) {
@@ -430,6 +472,8 @@ function closeModal() { $modal.innerHTML = ''; padState = null; }
 window.closeModal = closeModal;
 
 function staffPicker(id, allowed, preselect) {
+  // PINs required: no name list — the PIN says who is signing.
+  if (data.require_pin) return `<label>Your PIN</label><input class="inline" id="${id}_pin" type="password" inputmode="numeric" autocomplete="off" placeholder="Your personal PIN">`;
   if (!data.staff.length) return `<label>Your name</label><input class="inline" id="${id}_name" placeholder="Type your name" autocomplete="off">`;
   const list = allowed ? data.staff.filter(s => allowed.includes(s.id)) : data.staff;
   const pick = preselect || (list.some(s => s.id === lastStaff) ? lastStaff : 0);
@@ -451,12 +495,14 @@ function signerFields(id) {
   const out = {};
   const sel = document.getElementById(`${id}_staff`);
   if (sel) { out.staff_id = Number(sel.value) || 0; out.pin = (document.getElementById(`${id}_pin`) || {}).value || ''; }
+  else if (data.require_pin) out.pin = (document.getElementById(`${id}_pin`) || {}).value || '';
   else out.staff_name = (document.getElementById(`${id}_name`) || {}).value || '';
   return out;
 }
 
 window.openSign = (kind, id, staffId = 0) => {
   let title = '', sub = '', extra = '', allowed = null;
+  const noSig = kind === 'announcement' && data.require_pin;   // a read receipt is just the PIN
   if (kind === 'task') {
     const t = [...data.tasks_today, ...data.tasks_week].find(x => x.id === id);
     title = `Sign off: ${t.title}`; sub = t.kind === 'weekly' ? 'Counts for this whole week.' : `For ${fmtDay(viewDate)}.`;
@@ -465,6 +511,7 @@ window.openSign = (kind, id, staffId = 0) => {
   } else if (kind === 'announcement') {
     const a = data.announcements.find(x => x.id === id);
     title = 'Mark as read'; sub = (a.title || a.body).slice(0, 140);
+    if (data.require_pin) sub += ' — just your PIN, no signature needed.';
   } else {
     const g = data.goals.find(x => x.id === id);
     title = `Log progress: ${g.label}`; sub = `Now at ${fmtAmt(g.actual, g.unit)} of ${fmtAmt(g.target, g.unit)}.`;
@@ -480,14 +527,13 @@ window.openSign = (kind, id, staffId = 0) => {
     <h3>${esc(title)}</h3><p class="sub">${esc(sub)}</p>
     ${staffPicker('sg', allowed, staffId)}
     ${extra}
-    <label>Signature</label>
-    ${padHtml()}
+    ${noSig ? '' : `<label>Signature</label>${padHtml()}`}
     <div class="err" id="sg_err"></div>
-    <div class="row"><button class="small ghost" onclick="closeModal()">Cancel</button><button class="small green" id="sg_go" onclick="submitSign('${kind}', ${id})">Confirm &amp; sign</button></div>
+    <div class="row"><button class="small ghost" onclick="closeModal()">Cancel</button><button class="small green" id="sg_go" onclick="submitSign('${kind}', ${id})">${noSig ? 'Mark as read' : 'Confirm &amp; sign'}</button></div>
   </div></div>`;
   onStaffPick('sg');
-  initPad(document.getElementById('sg_pad'));
-  const first = document.getElementById('sg_amount') || document.getElementById('sg_name');
+  if (!noSig) initPad(document.getElementById('sg_pad'));
+  const first = document.getElementById('sg_amount') || document.getElementById('sg_name') || document.getElementById('sg_pin');
   if (first) first.focus();
 };
 
@@ -553,10 +599,12 @@ function readSignature() {
 }
 window.submitSign = async (kind, id) => {
   const err = document.getElementById('sg_err'), go = document.getElementById('sg_go');
-  const signature = readSignature();
-  if (!signature) { err.textContent = 'Add your signature first.'; return; }
+  const noSig = kind === 'announcement' && data.require_pin;
+  const signature = noSig ? '' : readSignature();
+  if (!noSig && !signature) { err.textContent = 'Add your signature first.'; return; }
   const body = { kind, id, date: viewDate, signature, ...signerFields('sg') };
-  if (data.staff.length && !body.staff_id) { err.textContent = 'Pick your name.'; return; }
+  if (data.require_pin) { if (!body.pin) { err.textContent = 'Enter your PIN.'; return; } }
+  else if (data.staff.length && !body.staff_id) { err.textContent = 'Pick your name.'; return; }
   const noteEl = document.getElementById('sg_note'); if (noteEl) body.note = noteEl.value.trim();
   const amtEl = document.getElementById('sg_amount'); if (amtEl) body.amount = Number(amtEl.value);
   go.disabled = true; err.textContent = '';
@@ -576,7 +624,8 @@ window.unsign = (completionId, staffId, staffName) => {
   const s = data.staff.find(x => x.id === staffId);
   $modal.innerHTML = `<div class="modal-back" onclick="if(event.target===this)closeModal()"><div class="modal">
     <h3>Undo sign-off</h3><p class="sub">Only ${esc(staffName)} (or a manager) can clear this.</p>
-    ${s && s.has_pin ? `<label>${esc(staffName)}'s PIN</label><input class="inline" id="un_pin" type="password" inputmode="numeric" autocomplete="off">` : ''}
+    ${data.require_pin ? `<label>Your PIN</label><input class="inline" id="un_pin" type="password" inputmode="numeric" autocomplete="off">`
+      : s && s.has_pin ? `<label>${esc(staffName)}'s PIN</label><input class="inline" id="un_pin" type="password" inputmode="numeric" autocomplete="off">` : ''}
     <div class="err" id="un_err"></div>
     <div class="row"><button class="small ghost" onclick="closeModal()">Cancel</button>
       <button class="small danger" onclick="submitUnsign(${completionId}, ${staffId})">Clear sign-off</button></div>
@@ -814,13 +863,16 @@ window.editAnn = id => {
 window.delAnn = async id => { if (confirm('Delete this announcement?')) { await api('/api/manager/announcement', { id, remove: true }); reloadMgr(); } };
 
 function mgrStaff() {
-  return `<p class="kicker-note">Everyone who signs things off on the board. A PIN (optional) means nobody can sign as that person without it.
+  const pi = mgr.pin_issues || { missing: 0, shared: 0 };
+  return `<p class="kicker-note">Everyone who signs things off on the board. Each person's own PIN is how they sign (and how they open the board as themselves on their phone) — it must be unique.
+    Turn on <b>Require employee PIN to sign</b> under Settings once everyone has one.
     <b>Managers with a mobile number on file can post to the board by text.</b></p>
+    ${pi.missing || pi.shared ? `<div class="notice warn">${pi.missing ? `${pi.missing} active ${pi.missing === 1 ? 'person has' : 'people have'} no PIN yet. ` : ''}${pi.shared ? `${pi.shared} ${pi.shared === 1 ? 'person has a PIN that is' : 'people have PINs that are'} shared or match the manager PIN / board password — give ${pi.shared === 1 ? 'them a new one' : 'them new ones'}.` : ''}</div>` : ''}
     <div class="tools"><div class="spacer"></div><button class="small" onclick="editStaff()">+ Add person</button></div>
     <p class="mini" style="margin:-6px 0 12px">Text opt-in page for staff (also what Twilio asks for as the opt-in policy): <code class="url">${esc(location.origin + '/sms.html')}</code></p>
     <table class="list"><tr><th>Name</th><th>Role</th><th>Phone</th><th>Texts</th><th>PIN</th><th></th></tr>
       ${mgr.staff.map(s => `<tr class="${s.active ? '' : 'off'}"><td>${esc(s.name)} ${onoff(s.active)}</td><td>${s.role}</td><td>${esc(s.phone)}</td>
-        <td class="mini">${!s.phone ? '—' : s.sms_consent_at ? `<span class="chip sms">opted in</span> ${esc(fmtShort(String(s.sms_consent_at).slice(0, 10)))}` : 'added by manager'}</td><td>${s.has_pin ? 'set' : '—'}</td>
+        <td class="mini">${!s.phone ? '—' : s.sms_consent_at ? `<span class="chip sms">opted in</span> ${esc(fmtShort(String(s.sms_consent_at).slice(0, 10)))}` : 'added by manager'}</td><td>${s.pin_shared ? '<span class="chip due">shared</span>' : s.has_pin ? 'set' : s.active ? '<span class="chip due">none</span>' : '—'}</td>
         <td class="acts"><button class="mini-btn" onclick="editStaff(${s.id})">Edit</button> <button class="mini-btn danger" onclick="delStaff(${s.id})">Delete</button></td></tr>`).join('')
         || '<tr><td colspan="6" class="empty">No one yet — until you add people, the board asks signers to type their name.</td></tr>'}
     </table>`;
@@ -831,7 +883,8 @@ window.editStaff = id => {
     { k: 'name', l: 'Name', v: s.name },
     { k: 'role', l: 'Role', v: s.role, type: 'select', opts: [['employee', 'Employee'], ['manager', 'Manager (can post by text)']] },
     { k: 'phone', l: 'Mobile number', v: s.phone, ph: '(555) 555-0100', hint: 'Managers text the board from this number.' },
-    { k: 'pin', l: id ? 'New PIN (blank = keep current)' : 'PIN (optional, 4–8 digits)', v: '', type: 'password', ph: id && s.has_pin ? '••••' : '' },
+    { k: 'pin', l: id ? 'New PIN (blank = keep current)' : 'PIN (4–8 digits, unique to this person)', v: '', type: 'password', ph: id && s.has_pin ? '••••' : '', gen: true,
+      hint: 'Their personal PIN is how they sign things off. PINs are never shown again after saving — write it down for them, or reset it here.' },
     ...(id ? [{ k: 'clear_pin', l: 'Remove PIN', v: '0', type: 'select', opts: [['0', 'No'], ['1', 'Yes — no PIN needed']] }] : []),
     { k: 'active', l: 'Active', v: s.active ? '1' : '0', type: 'select', opts: [['1', 'Yes'], ['0', 'No — hidden from the board']] },
   ], f => {
@@ -839,6 +892,13 @@ window.editStaff = id => {
     if (f.clear_pin === '1') body.pin = ''; else if (f.pin) body.pin = f.pin;
     return api('/api/manager/staff', body);
   });
+};
+// Fill the PIN box with a random unused PIN, shown in the clear so the manager can pass it on.
+window.genPin = async () => {
+  const out = await api('/api/manager/staff/new-pin');
+  const el = $modal.querySelector('[data-k="pin"]');
+  if (out.pin && el) { el.type = 'text'; el.value = out.pin; }
+  else if (out.error) document.getElementById('fm_err').textContent = out.error;
 };
 window.delStaff = async id => { if (confirm('Remove this person? Their past sign-offs keep their name.')) { await api('/api/manager/staff', { id, remove: true }); reloadMgr(); } };
 
@@ -972,6 +1032,13 @@ function mgrSettings() {
     <b style="display:block;margin-top:22px">Access</b>
     ${f('st_pass', 'Board password', s.board_pass, 'What the team enters on the board device. Blank = only managers can open the board. Changing it signs every board device out.')}
     ${f('st_pin', 'Manager PIN', s.manager_pin, 'Unlocks this panel. Change it from the default!')}
+    <b style="display:block;margin-top:22px">Signing</b>
+    <label for="st_reqpin">Require employee PIN to sign</label>
+    <select class="inline" id="st_reqpin" style="width:100%">
+      <option value="0" ${!s.require_pin ? 'selected' : ''}>No — people pick their name (their PIN too, if they have one)</option>
+      <option value="1" ${s.require_pin ? 'selected' : ''}>Yes — each sign-off needs the employee's own PIN, which picks their name. The board password can't sign anything.</option>
+    </select>
+    <div class="help">Give everyone a PIN under Staff first. Employees can also type their PIN on the sign-in screen to open the board as themselves — announcements they see are then marked read for them automatically.</div>
     <b style="display:block;margin-top:22px">Text-in</b>
     ${f('st_num', 'Board phone number (shown on the board)', s.sms_number, '', 'placeholder="(555) 555-0100"')}
     <label for="st_kind">Texts with no keyword become</label>
@@ -1000,8 +1067,11 @@ function mgrSettings() {
 }
 window.saveSettings = async () => {
   const g = id => document.getElementById(id).value.trim();
+  const pi = mgr.pin_issues || { missing: 0, shared: 0 };
+  if (g('st_reqpin') === '1' && !mgr.settings.require_pin && (pi.missing || pi.shared) &&
+      !confirm(`${pi.missing} active ${pi.missing === 1 ? 'person has' : 'people have'} no PIN and ${pi.shared} ${pi.shared === 1 ? 'has' : 'have'} a shared PIN. They won't be able to sign anything until they get one. Turn it on anyway?`)) return;
   const out = await api('/api/manager/settings', {
-    timezone: g('st_tz'), board_pass: g('st_pass'), manager_pin: g('st_pin'), sms_number: g('st_num'), sms_default_kind: g('st_kind'), sms_reply: g('st_reply'), sms_notify: g('st_notify'), sms_broadcast: g('st_bcast'),
+    timezone: g('st_tz'), board_pass: g('st_pass'), manager_pin: g('st_pin'), require_pin: g('st_reqpin'), sms_number: g('st_num'), sms_default_kind: g('st_kind'), sms_reply: g('st_reply'), sms_notify: g('st_notify'), sms_broadcast: g('st_bcast'),
   });
   if (out.error) { document.getElementById('st_err').textContent = out.error; return; }
   if (out.token) { mgrToken = out.token; localStorage.setItem('db_mgr_token', mgrToken); }
@@ -1153,7 +1223,7 @@ function formModal(title, fields, save) {
       : f.type === 'textarea' ? `<textarea class="inline" data-k="${f.k}" placeholder="${attr(f.ph || '')}">${esc(f.v)}</textarea>`
       : f.type === 'checks' ? `<div class="checks" data-k="${f.k}" data-multi="1">${f.opts.map(([v, l]) => `<label class="chk"><input type="checkbox" value="${attr(v)}" ${(f.v || []).includes(v) ? 'checked' : ''}> ${esc(l)}</label>`).join('') || '<span class="mini">No one yet.</span>'}</div>`
       : `<input class="inline" data-k="${f.k}" type="${f.type || 'text'}" value="${attr(f.v ?? '')}" placeholder="${attr(f.ph || '')}" ${f.type === 'number' ? 'step="any"' : ''} autocomplete="off">`
-    }${f.hint ? `<div class="mini" style="margin-top:3px">${esc(f.hint)}</div>` : ''}`).join('')}
+    }${f.hint ? `<div class="mini" style="margin-top:3px">${esc(f.hint)}</div>` : ''}${f.gen ? `<button type="button" class="mini-btn" style="margin-top:6px" onclick="genPin()">Generate a PIN</button>` : ''}`).join('')}
     <div class="err" id="fm_err"></div>
     <div class="row"><button type="button" class="small ghost" onclick="closeModal()">Cancel</button><button type="submit" class="small green" id="fm_go">Save</button></div>
     </form></div></div>`;
