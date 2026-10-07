@@ -224,6 +224,9 @@ function mount(app, deps) {
     if (pinFails.size > 5000) pinFails.clear();
   };
   const requirePin = async () => (await db.getSetting('require_pin', '0')) === '1';
+  // Announcements leave the board on their own after this many days (0 = never). Pinned ones stay, and an
+  // announcement's own "Hide after" date wins. They're kept — with who read them — in the manager portal.
+  const announceDays = async () => { const n = Math.round(Number(await db.getSetting('announce_days', '7'))); return Number.isFinite(n) ? Math.max(0, Math.min(365, n)) : 7; };
 
   // ---------- app notifications (Web Push) ----------
   // The VAPID key pair identifies this server to the phones' push services. It's created once and
@@ -276,6 +279,16 @@ function mount(app, deps) {
       return await sendPush(subs, { title: `${biz}: new task`, body: `${assignees.length ? 'For you' : 'For everyone'} — ${task.title}`.slice(0, 160), tag: 'task-' + task.id, url: '/' });
     } catch (e) { console.warn('push error:', e && e.message); return { sent: 0 }; }
   }
+  // Managers' devices — signed in with the manager PIN, or belonging to someone with the Manager role —
+  // hear about every completed task (except from their own sign-off).
+  async function pushTaskDone(task, who, completionId, progress = '') {
+    try {
+      const subs = await q(`SELECT p.* FROM push_subscriptions p LEFT JOIN staff s ON s.id = p.staff_id
+        WHERE (p.is_manager OR (s.role = 'manager' AND s.active = 1)) AND (p.staff_id IS NULL OR p.staff_id <> $1)`, [who.staff_id || 0]);
+      const biz = await db.getSetting('business_name', 'Daily Board');
+      return await sendPush(subs, { title: `${biz}: task completed`, body: `✓ ${who.staff_name} completed: ${task.title}${progress}`.slice(0, 160), tag: 'done-' + completionId, url: '/' });
+    } catch (e) { console.warn('push error:', e && e.message); return { sent: 0 }; }
+  }
   // Only real push services may be subscribed (the server will POST to this address).
   const pushHostOk = u => { try { const h = new URL(u); return h.protocol === 'https:' && /(^|\.)(googleapis\.com|push\.apple\.com|mozilla\.com|windows\.com)$/.test(h.hostname); } catch { return false; } };
   app.get('/api/push/key', boardAuth, wrap(async (req, res) => {
@@ -286,9 +299,9 @@ function mount(app, deps) {
     const s = (req.body || {}).subscription || {};
     const endpoint = String(s.endpoint || ''), p256dh = String((s.keys || {}).p256dh || ''), auth = String((s.keys || {}).auth || '');
     if (!pushHostOk(endpoint) || endpoint.length > 1000 || !p256dh || !auth) return res.status(400).json({ error: 'That device can\'t receive notifications.' });
-    await q(`INSERT INTO push_subscriptions (endpoint, p256dh, auth, staff_id, user_agent) VALUES ($1,$2,$3,$4,$5)
-      ON CONFLICT (endpoint) DO UPDATE SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth, staff_id = EXCLUDED.staff_id, user_agent = EXCLUDED.user_agent`,
-      [endpoint, p256dh, auth, req.staffId || null, String(req.headers['user-agent'] || '').slice(0, 200)]);
+    await q(`INSERT INTO push_subscriptions (endpoint, p256dh, auth, staff_id, user_agent, is_manager) VALUES ($1,$2,$3,$4,$5,$6)
+      ON CONFLICT (endpoint) DO UPDATE SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth, staff_id = EXCLUDED.staff_id, user_agent = EXCLUDED.user_agent, is_manager = EXCLUDED.is_manager`,
+      [endpoint, p256dh, auth, req.staffId || null, String(req.headers['user-agent'] || '').slice(0, 200), req.role === 'manager']);
     res.json({ ok: true });
   }));
   app.post('/api/push/unsubscribe', boardAuth, wrap(async (req, res) => {
@@ -357,6 +370,7 @@ function mount(app, deps) {
     const todayStr = await today();
     const ws = weekStart(date), dow = dowOf(date);
     await materializeGoals(date, todayStr);
+    const annDays = await announceDays();
     const [goals, entries, staff, tasks, completions, anns, acks, settings] = await Promise.all([
       q('SELECT * FROM goals WHERE date = $1 ORDER BY sort, id', [date]),
       q(`SELECT e.goal_id, e.amount, e.staff_name, e.note, e.created_at FROM goal_entries e
@@ -365,8 +379,9 @@ function mount(app, deps) {
       q(`SELECT * FROM tasks WHERE active = 1 AND (kind = 'daily' OR (kind = 'once' AND due_date = $1) OR kind = 'weekly')
          ORDER BY sort, id`, [date]),
       q('SELECT * FROM task_completions WHERE period IN ($1, $2)', [date, ws]),
-      q(`SELECT * FROM announcements WHERE active = 1 AND (expires_on IS NULL OR expires_on >= $1)
-         ORDER BY pinned DESC, id DESC LIMIT 50`, [date]),
+      q(`SELECT * FROM announcements WHERE active = 1 AND (CASE WHEN expires_on IS NOT NULL THEN expires_on >= $1
+           ELSE (pinned = 1 OR $2::int = 0 OR created_at > now() - make_interval(days => $2::int)) END)
+         ORDER BY pinned DESC, id DESC LIMIT 50`, [date, annDays]),
       q(`SELECT a.announcement_id, a.staff_name, a.signed_at FROM announcement_acks a
          JOIN announcements n ON n.id = a.announcement_id WHERE n.active = 1 ORDER BY a.id`),
       db.getAllSettings(),
@@ -571,6 +586,9 @@ function mount(app, deps) {
         try {
           const row = await one(`INSERT INTO task_completions (task_id, period, staff_id, staff_name, signature, signature_kind, note, signed_ip)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, signed_at`, vals);
+          let progress = '';
+          try { if (required.length > 1) progress = ` (${(await one('SELECT COUNT(*)::int AS n FROM task_completions WHERE task_id = $1 AND period = $2', [t.id, period])).n} of ${required.length})`; } catch { /* the push is optional */ }
+          await pushTaskDone(t, who, row.id, progress);
           return res.json({ ok: true, completion: { id: row.id, ...who, ...sig, note, signed_at: row.signed_at } });
         } catch (e) {
           if (e.code === '23505') return res.status(409).json({ error: `${who.staff_name} already signed this off.` });
@@ -582,6 +600,7 @@ function mount(app, deps) {
         SELECT $1::int, $2::text, $3::int, $4::text, $5::text, $6::text, $7::text, $8::text
         WHERE NOT EXISTS (SELECT 1 FROM task_completions WHERE task_id = $1 AND period = $2) RETURNING id, signed_at`, vals);
       if (!row) return res.status(409).json({ error: 'Someone already signed this off — refresh the board.' });
+      await pushTaskDone(t, who, row.id);
       return res.json({ ok: true, completion: { id: row.id, ...who, ...sig, note, signed_at: row.signed_at } });
     }
     if (b.kind === 'announcement') {
@@ -657,6 +676,13 @@ function mount(app, deps) {
          FROM goal_entries e JOIN goals g ON g.id = e.goal_id
          WHERE e.created_at > now() - interval '30 days' ORDER BY e.created_at DESC LIMIT 500`),
     ]);
+    // Announcements: which are still on the board, which have aged out / expired, and who read each.
+    const annDays = await announceDays();
+    const annAcks = announcements.length ? await q('SELECT announcement_id, staff_name, signed_at FROM announcement_acks WHERE announcement_id = ANY($1::int[]) ORDER BY id', [announcements.map(a => a.id)]) : [];
+    const ackMap = {};
+    for (const a of annAcks) (ackMap[a.announcement_id] = ackMap[a.announcement_id] || []).push({ staff_name: a.staff_name, signed_at: a.signed_at });
+    const onBoard = a => !!a.active && (a.expires_on ? a.expires_on >= todayStr : (!!a.pinned || annDays === 0 || new Date(a.created_at).getTime() > Date.now() - annDays * 86400000));
+    const announcementsOut = announcements.map(a => ({ ...a, acks: ackMap[a.id] || [], on_board: onBoard(a), hidden_why: !a.active ? 'off' : onBoard(a) ? '' : a.expires_on ? 'expired' : 'aged' }));
     // PINs never leave the server: the panel only learns who has one, and whether two people share one.
     const s = await db.getAllSettings();
     const pinCount = {}, reserved = new Set([s.manager_pin || '', (s.board_pass || '').trim()]);
@@ -671,16 +697,24 @@ function mount(app, deps) {
       today: todayStr, staff: staffOut, pin_issues, peer_evals, eval_settings: ev,
       goal_templates: goal_templates.map(t => ({ ...t, target: Number(t.target) })),
       goals: goals.map(g => ({ ...g, target: Number(g.target), baseline: g.baseline == null ? null : Number(g.baseline) })),
-      goal_schedule, tasks, announcements, sms_log, completions, goal_entries: entries,
+      goal_schedule, tasks, announcements: announcementsOut, sms_log, completions, goal_entries: entries,
       branding: await db.branding(),
       settings: {
-        timezone: s.timezone || '',
+        timezone: s.timezone || '', announce_days: annDays,
         board_pass: s.board_pass || '', manager_pin: s.manager_pin || '', require_pin: s.require_pin === '1',
         sms_number: s.sms_number || '', sms_default_kind: s.sms_default_kind || 'announcement', sms_reply: s.sms_reply !== '0',
         sms_secured: !!(process.env.TWILIO_AUTH_TOKEN || process.env.SMS_WEBHOOK_SECRET),
         sms_outbound: smsOutboundReady(), sms_notify: (s.sms_notify || '1') !== '0', sms_broadcast: s.sms_broadcast === '1',
       },
     });
+  }));
+
+  // One sign-off in full (the signature image is too big to send with the whole activity log).
+  app.get('/api/manager/completion/:id', managerOnly, wrap(async (req, res) => {
+    const c = await one(`SELECT c.id, t.title, t.kind, c.period, c.staff_name, c.signature, c.signature_kind, c.note, c.signed_ip, c.signed_at
+      FROM task_completions c JOIN tasks t ON t.id = c.task_id WHERE c.id = $1`, [Number(req.params.id) || 0]);
+    if (!c) return res.status(404).json({ error: 'That sign-off was cleared.' });
+    res.json(c);
   }));
 
   // A random 6-digit PIN nobody uses yet (and that isn't the manager PIN or board password).
@@ -917,6 +951,7 @@ function mount(app, deps) {
       if (out[k] && out[k] !== (await db.getSetting(k, '')).trim() && await one('SELECT 1 AS x FROM staff WHERE pin = $1', [out[k]]))
         return res.status(400).json({ error: `That ${k === 'board_pass' ? 'board password' : 'manager PIN'} matches an employee's PIN — pick something different.` });
     if (b.require_pin != null) out.require_pin = isOff(b.require_pin) ? '0' : '1';
+    if (b.announce_days != null) out.announce_days = String(Math.max(0, Math.min(365, Math.round(num(b.announce_days)))));
     if (b.sms_number != null) out.sms_number = clean(b.sms_number, 40);
     if (b.sms_default_kind != null) out.sms_default_kind = b.sms_default_kind === 'task' ? 'task' : 'announcement';
     if (b.sms_reply != null) out.sms_reply = isOff(b.sms_reply) ? '0' : '1';

@@ -63,6 +63,11 @@ page) refreshes on demand.
   managers see everything under Manager panel → Evaluations, with per-person
   averages by week and a CSV export.
 - **Prev / Next day** pages through history to see how a day was closed out.
+- **Finished work clears itself.** A completed task leaves today's board (it's
+  kept in Manager panel → Activity, with a *View* button for the signature; clear
+  a mistaken sign-off there and the task comes back). Announcements leave the board
+  after the number of days set under Settings (default 7, pinned ones stay) and move
+  to an archive on the Announcements tab that shows who read each one.
 
 **The manager panel** (manager PIN) manages recurring goals and per-day
 overrides, tasks, announcements, the staff roster (optional per-person PIN so
@@ -111,6 +116,10 @@ sends a push, free, when:
 - a **task is assigned to you** — it reaches the devices signed in with *your own
   PIN* (type your PIN on the sign-in screen, so the board knows the device is yours);
 - a task is assigned to **everyone** — it reaches every device with notifications on.
+
+- a **task is completed** — managers only (devices signed in with the manager PIN,
+  or with the PIN of someone who has the Manager role): "✓ Sam completed: Open
+  store", with progress like "(2 of 5)" for tasks several people each sign.
 
 Pushes come in addition to texts, never instead of them. Tapping one opens the
 board and refreshes it. **iPhone / iPad:** notifications only work from the

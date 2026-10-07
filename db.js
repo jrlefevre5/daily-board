@@ -212,6 +212,8 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
   user_agent TEXT NOT NULL DEFAULT '',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Devices signed in with the manager PIN hear about every completed task.
+ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS is_manager BOOLEAN NOT NULL DEFAULT false;
 -- On Supabase, tables are also reachable through its auto-generated REST API.
 -- Row Level Security with no policies = deny-all there; this app connects as
 -- the table owner, which bypasses RLS, so nothing changes for it.
@@ -224,7 +226,7 @@ END $$;
 `;
 
 // Bump when DDL or defaults change; a mismatch replays the (idempotent) migration.
-const SCHEMA_VERSION = '7';
+const SCHEMA_VERSION = '8';
 
 async function ensureDefaults() {
   const setDefault = (k, v) => q('INSERT INTO settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO NOTHING', [k, v]);
