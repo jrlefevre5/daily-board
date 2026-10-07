@@ -214,6 +214,7 @@ window.addEventListener('online', () => refreshNow({ quiet: true }));
 // tied to that person, so "a task was assigned to you" alerts can find it. iPhones only allow this
 // from the installed (home-screen) app.
 let pushKey = null, pushOn = false, pushOwner = null;
+const pushWho = () => (data && data.me ? data.me.id : 0) + (mgrToken ? 'm' : '');   // who this device belongs to (and whether it's a manager's)
 const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
 const pushReg = () => navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.ready);
 function keyBytes(s) { const raw = atob((s + '='.repeat((4 - s.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/')); return Uint8Array.from(raw, c => c.charCodeAt(0)); }
@@ -227,7 +228,7 @@ async function initPush() {
     if (pushSupported() && Notification.permission === 'granted') {
       const sub = await (await pushReg()).pushManager.getSubscription();
       if (sub) {
-        const owner = data && data.me ? data.me.id : 0;
+        const owner = pushWho();
         if (pushOwner !== owner) { await api('/api/push/subscribe', { subscription: sub.toJSON() }); pushOwner = owner; }   // keeps the device tied to whoever is signed in
         pushOn = true;
       }
@@ -257,8 +258,8 @@ window.toggleNotifications = async () => {
     const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(pushKey) });
     const out = await api('/api/push/subscribe', { subscription: sub.toJSON() });
     if (out.error) { await sub.unsubscribe(); alert(out.error); return; }
-    pushOwner = data && data.me ? data.me.id : 0;
-    showHint(pushOwner ? 'Notifications on' : 'Notifications on — sign in with your own PIN to also get your personal tasks');
+    pushOwner = pushWho();
+    showHint(mgrToken ? 'Notifications on — you\'ll hear when tasks are completed' : data && data.me ? 'Notifications on' : 'Notifications on — sign in with your own PIN to also get your personal tasks');
     initPush();
   } catch (e) { alert("Couldn't change notifications: " + ((e && e.message) || e)); }
 };
@@ -285,6 +286,9 @@ function render() {
   const canSign = !isFuture;
   const goalsDone = data.goals.filter(g => g.target > 0 && g.actual >= g.target).length;
   const tDone = data.tasks_today.filter(t => t.completion).length, wDone = data.tasks_week.filter(t => t.completion).length;
+  // Today's finished tasks drop off the board (the manager portal's Activity log keeps them); past days still show everything.
+  const todayList = isToday ? data.tasks_today.filter(t => !t.done) : data.tasks_today;
+  const weekList = isToday ? data.tasks_week.filter(t => !t.done) : data.tasks_week;
   $app.innerHTML = `
     <div class="bar">
       <div class="date"><small>${isToday ? 'Today' : isFuture ? 'Upcoming' : 'Looking back'}</small>${esc(fmtDay(viewDate))}</div>
@@ -314,11 +318,11 @@ function render() {
     <div class="grid2">
       <div class="panel">
         <h2>Today's tasks <span class="count">${data.tasks_today.length ? `${tDone} / ${data.tasks_today.length} done` : ''}</span></h2>
-        ${data.tasks_today.length ? data.tasks_today.map(taskRow(canSign)).join('') : `<div class="empty">No daily tasks yet.</div>`}
+        ${todayList.length ? todayList.map(taskRow(canSign)).join('') : `<div class="empty">${data.tasks_today.length ? 'All done for today ✓' : 'No daily tasks yet.'}</div>`}
       </div>
       <div class="panel">
         <h2>This week <span class="count">${esc(fmtShort(data.week_start))} – ${esc(fmtShort(data.week_end))}${data.tasks_week.length ? ` · ${wDone} / ${data.tasks_week.length} done` : ''}</span></h2>
-        ${data.tasks_week.length ? data.tasks_week.map(taskRow(canSign)).join('') : `<div class="empty">No weekly tasks yet.</div>`}
+        ${weekList.length ? weekList.map(taskRow(canSign)).join('') : `<div class="empty">${data.tasks_week.length ? 'All done for this week ✓' : 'No weekly tasks yet.'}</div>`}
       </div>
     </div>
     ${evalPanel(canSign && isToday)}
@@ -949,13 +953,24 @@ window.editTask = id => {
 window.delTask = async id => { if (confirm('Delete this task and its sign-off history?')) { await api('/api/manager/task', { id, remove: true }); reloadMgr(); } };
 
 function mgrAnns() {
+  const days = mgr.settings.announce_days;
+  const live = mgr.announcements.filter(a => a.on_board), archived = mgr.announcements.filter(a => !a.on_board);
+  const why = a => ({ off: 'switched off', expired: 'expired', aged: `older than ${days} days` })[a.hidden_why] || 'hidden';
+  const row = a => `<tr class="${a.on_board ? '' : 'off'}"><td>${a.pinned ? '<span class="chip pin">Pinned</span> ' : ''}${a.title ? `<b>${esc(a.title)}</b><br>` : ''}${esc(a.body).slice(0, 300)} ${a.on_board ? '' : `<span class="chip due">${esc(why(a))}</span>`}
+      ${a.media_url ? `<div class="mini"><a href="${attr(a.media_url)}" target="_blank" rel="noopener">photo</a></div>` : ''}${a.expires_on ? `<div class="mini">until ${esc(fmtShort(a.expires_on))}</div>` : ''}
+      <div class="mini"><b>Read by ${a.acks.length}:</b> ${a.acks.length ? a.acks.map(x => esc(x.staff_name)).join(', ') : 'nobody yet'}</div></td>
+    <td class="mini">${esc(a.created_by)}${a.source === 'sms' ? ' <span class="chip sms">text</span>' : ''}<br>${esc(fmtStamp(a.created_at))}</td>
+    <td class="acts"><button class="mini-btn" onclick="editAnn(${a.id})">Edit</button> <button class="mini-btn danger" onclick="delAnn(${a.id})">Delete</button></td></tr>`;
   return `<div class="tools"><div class="spacer"></div><button class="small" onclick="editAnn()">+ Post announcement</button></div>
+    <p class="kicker-note">${days ? `Announcements leave the board on their own after <b>${days} day${days === 1 ? '' : 's'}</b> (pinned ones stay; a "Hide after" date on an announcement wins). Change it under Settings.` : 'Announcements stay on the board until you hide or delete them. You can make them leave on their own under Settings.'}
+      Hidden ones are kept below with who read them.</p>
+    <b>On the board</b>
     <table class="list"><tr><th>Announcement</th><th>Posted</th><th></th></tr>
-      ${mgr.announcements.map(a => `<tr class="${a.active ? '' : 'off'}"><td>${a.pinned ? '<span class="chip pin">Pinned</span> ' : ''}${a.title ? `<b>${esc(a.title)}</b><br>` : ''}${esc(a.body).slice(0, 300)} ${onoff(a.active)}
-          ${a.media_url ? `<div class="mini"><a href="${attr(a.media_url)}" target="_blank" rel="noopener">photo</a></div>` : ''}${a.expires_on ? `<div class="mini">until ${esc(fmtShort(a.expires_on))}</div>` : ''}</td>
-        <td class="mini">${esc(a.created_by)}${a.source === 'sms' ? ' <span class="chip sms">text</span>' : ''}<br>${esc(fmtStamp(a.created_at))}</td>
-        <td class="acts"><button class="mini-btn" onclick="editAnn(${a.id})">Edit</button> <button class="mini-btn danger" onclick="delAnn(${a.id})">Delete</button></td></tr>`).join('')
-        || '<tr><td colspan="3" class="empty">Nothing posted.</td></tr>'}
+      ${live.map(row).join('') || '<tr><td colspan="3" class="empty">Nothing on the board.</td></tr>'}
+    </table>
+    <b style="display:block;margin-top:18px">Archive — hidden from the board</b>
+    <table class="list"><tr><th>Announcement</th><th>Posted</th><th></th></tr>
+      ${archived.map(row).join('') || '<tr><td colspan="3" class="empty">Nothing archived yet.</td></tr>'}
     </table>`;
 }
 window.editAnn = id => {
@@ -1049,14 +1064,30 @@ No keyword → ${s.sms_default_kind === 'task' ? "goes on today's tasks" : 'post
     </table>`;
 }
 
+// One sign-off in full: who, when, the note, and the signature (drawn or typed).
+window.viewSignoff = async id => {
+  const c = await api('/api/manager/completion/' + id);
+  if (c.error) { alert(c.error); return; }
+  $modal.innerHTML = `<div class="modal-back" onclick="if(event.target===this)closeModal()"><div class="modal">
+    <h3>${esc(c.title)}</h3>
+    <p class="sub">${esc(c.kind === 'weekly' ? 'Week of ' + fmtShort(c.period) : fmtDay(c.period))} · signed off by <b>${esc(c.staff_name)}</b> · ${esc(fmtStamp(c.signed_at))}</p>
+    ${c.note ? `<p>“${esc(c.note)}”</p>` : ''}
+    <label>Signature</label>
+    ${c.signature_kind === 'drawn' ? `<div class="pad" style="padding:8px"><img src="${attr(c.signature)}" alt="signature" style="max-width:100%;max-height:160px"></div>` : `<div class="typed" style="font-size:26px">${esc(c.signature)}</div>`}
+    <p class="mini">Device address ${esc(c.signed_ip || '—')}</p>
+    <div class="row"><button class="small ghost" onclick="closeModal()">Close</button></div>
+  </div></div>`;
+};
+
 function mgrActivity() {
-  return `<p class="kicker-note">Every sign-off and goal entry from the last 30 days — who, what, when. Clear one if it was a mistaken tap.</p>
+  return `<p class="kicker-note">Every sign-off and goal entry from the last 30 days — who, what, when. A completed task leaves the board and is kept here;
+    <b>View</b> shows the signature. Clear one if it was a mistaken tap (the task comes back on the board). You also get a push when someone completes a task, if your device has notifications on.</p>
     <div class="tools"><div class="spacer"></div><button class="mini-btn" onclick="downloadCsv()">Download CSV</button></div>
     <b>Task sign-offs</b>
     <table class="list"><tr><th>When</th><th>Task</th><th>For</th><th>Who</th><th></th></tr>
       ${mgr.completions.map(c => `<tr><td class="mini" style="white-space:nowrap">${esc(fmtStamp(c.signed_at))}</td><td>${esc(c.title)} <span class="mini">${c.kind}</span></td>
         <td class="mini">${esc(c.kind === 'weekly' ? 'week of ' + fmtShort(c.period) : fmtShort(c.period))}</td><td>${esc(c.staff_name)} <span class="mini">${c.signature_kind}</span>${c.note ? `<div class="mini">“${esc(c.note)}”</div>` : ''}</td>
-        <td class="acts"><button class="mini-btn danger" onclick="clearItem({completion_id:${c.id}})">Clear</button></td></tr>`).join('') || '<tr><td colspan="5" class="empty">None yet.</td></tr>'}
+        <td class="acts"><button class="mini-btn" onclick="viewSignoff(${c.id})">View</button> <button class="mini-btn danger" onclick="clearItem({completion_id:${c.id}})">Clear</button></td></tr>`).join('') || '<tr><td colspan="5" class="empty">None yet.</td></tr>'}
     </table>
     <b style="display:block;margin-top:18px">Goal entries</b>
     <table class="list"><tr><th>When</th><th>Goal</th><th>Amount</th><th>Who</th><th></th></tr>
@@ -1143,6 +1174,8 @@ function mgrSettings() {
     <b style="display:block;margin-top:22px">Access</b>
     ${f('st_pass', 'Board password', s.board_pass, 'What the team enters on the board device. Blank = only managers can open the board. Changing it signs every board device out.')}
     ${f('st_pin', 'Manager PIN', s.manager_pin, 'Unlocks this panel. Change it from the default!')}
+    <b style="display:block;margin-top:22px">Announcements</b>
+    ${f('st_annDays', 'Hide announcements after (days)', s.announce_days, '0 = never. They leave the board on their own after this many days and move to the archive on the Announcements tab (with who read them). Pinned ones stay; a "Hide after" date on an announcement wins.', 'type="number" min="0" max="365"')}
     <b style="display:block;margin-top:22px">Signing</b>
     <label for="st_reqpin">Require employee PIN to sign</label>
     <select class="inline" id="st_reqpin" style="width:100%">
@@ -1182,7 +1215,7 @@ window.saveSettings = async () => {
   if (g('st_reqpin') === '1' && !mgr.settings.require_pin && (pi.missing || pi.shared) &&
       !confirm(`${pi.missing} active ${pi.missing === 1 ? 'person has' : 'people have'} no PIN and ${pi.shared} ${pi.shared === 1 ? 'has' : 'have'} a shared PIN. They won't be able to sign anything until they get one. Turn it on anyway?`)) return;
   const out = await api('/api/manager/settings', {
-    timezone: g('st_tz'), board_pass: g('st_pass'), manager_pin: g('st_pin'), require_pin: g('st_reqpin'), sms_number: g('st_num'), sms_default_kind: g('st_kind'), sms_reply: g('st_reply'), sms_notify: g('st_notify'), sms_broadcast: g('st_bcast'),
+    timezone: g('st_tz'), board_pass: g('st_pass'), manager_pin: g('st_pin'), require_pin: g('st_reqpin'), announce_days: g('st_annDays'), sms_number: g('st_num'), sms_default_kind: g('st_kind'), sms_reply: g('st_reply'), sms_notify: g('st_notify'), sms_broadcast: g('st_bcast'),
   });
   if (out.error) { document.getElementById('st_err').textContent = out.error; return; }
   if (out.token) { mgrToken = out.token; localStorage.setItem('db_mgr_token', mgrToken); }
