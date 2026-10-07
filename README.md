@@ -101,6 +101,22 @@ PIN to sign**:
 - The setting is off by default so nobody is locked out before everyone has a PIN.
   PINs are stored as entered and never sent back to the browser.
 
+## App notifications
+
+Install the app (above), open it, and tap the **🔕 bell** in the top bar to allow
+notifications on that device (🔔 = on; tap again to turn off). The board then
+sends a push, free, when:
+
+- a **new announcement** is posted (typed in the manager panel or texted in);
+- a **task is assigned to you** — it reaches the devices signed in with *your own
+  PIN* (type your PIN on the sign-in screen, so the board knows the device is yours);
+- a task is assigned to **everyone** — it reaches every device with notifications on.
+
+Pushes come in addition to texts, never instead of them. Tapping one opens the
+board and refreshes it. **iPhone / iPad:** notifications only work from the
+installed home-screen app (iOS 16.4+), not from a Safari tab. The push keys are
+created automatically on first use and stored in the database; no setup needed.
+
 ## Post by text message
 
 Managers whose mobile number is on the roster can text the board's number. The

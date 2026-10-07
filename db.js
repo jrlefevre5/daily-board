@@ -201,19 +201,30 @@ CREATE TABLE IF NOT EXISTS sms_log (
   reply TEXT NOT NULL DEFAULT '',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- App notifications (Web Push): one row per phone/browser that turned them on.
+-- staff_id is set when the person signed in with their own PIN (so task alerts can find them).
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id SERIAL PRIMARY KEY,
+  endpoint TEXT NOT NULL UNIQUE,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  staff_id INTEGER REFERENCES staff(id) ON DELETE CASCADE,
+  user_agent TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 -- On Supabase, tables are also reachable through its auto-generated REST API.
 -- Row Level Security with no policies = deny-all there; this app connects as
 -- the table owner, which bypasses RLS, so nothing changes for it.
 DO $$ DECLARE t text; BEGIN
   FOREACH t IN ARRAY ARRAY['settings','staff','goal_templates','goals','goal_entries','tasks',
-    'task_completions','announcements','announcement_acks','sms_log','peer_evals','sms_consents'] LOOP
+    'task_completions','announcements','announcement_acks','sms_log','peer_evals','sms_consents','push_subscriptions'] LOOP
     EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
   END LOOP;
 END $$;
 `;
 
 // Bump when DDL or defaults change; a mismatch replays the (idempotent) migration.
-const SCHEMA_VERSION = '6';
+const SCHEMA_VERSION = '7';
 
 async function ensureDefaults() {
   const setDefault = (k, v) => q('INSERT INTO settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO NOTHING', [k, v]);

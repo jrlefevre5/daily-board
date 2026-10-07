@@ -7,6 +7,9 @@
 // Mounted by server.js:  require('./board')(app, deps)
 const crypto = require('crypto');
 const express = require('express');
+// App notifications (Web Push). If the package isn't installed the board still runs; notifications just stay off.
+let webpush = null;
+try { webpush = require('web-push'); } catch { /* notifications unavailable */ }
 
 const DOW_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const DOW_MATCH = [/^sun/, /^mon/, /^tue/, /^wed/, /^thu/, /^fri/, /^sat/];
@@ -221,6 +224,77 @@ function mount(app, deps) {
     if (pinFails.size > 5000) pinFails.clear();
   };
   const requirePin = async () => (await db.getSetting('require_pin', '0')) === '1';
+
+  // ---------- app notifications (Web Push) ----------
+  // The VAPID key pair identifies this server to the phones' push services. It's created once and
+  // kept in the settings table (like the sign-in secret); one row so two instances can't disagree.
+  async function vapidKeys() {
+    if (!webpush) return null;
+    let raw = await db.getSetting('vapid', '');
+    if (!raw) {
+      const k = webpush.generateVAPIDKeys();
+      await q("INSERT INTO settings (key, value) VALUES ('vapid', $1) ON CONFLICT (key) DO NOTHING", [JSON.stringify({ pub: k.publicKey, priv: k.privateKey })]);
+      db.clearSettingsCache();
+      raw = await db.getSetting('vapid', '');
+    }
+    try { const k = JSON.parse(raw); return k && k.pub && k.priv ? k : null; } catch { return null; }
+  }
+  // Push to a list of push_subscriptions rows. Best effort: failures are logged, dead subscriptions pruned.
+  async function sendPush(subs, payload) {
+    try {
+      const keys = subs.length ? await vapidKeys() : null;
+      if (!keys) return { sent: 0 };
+      const subject = process.env.VAPID_SUBJECT || (process.env.VERCEL_PROJECT_PRODUCTION_URL ? 'https://' + process.env.VERCEL_PROJECT_PRODUCTION_URL : 'mailto:admin@example.com');
+      const opts = { vapidDetails: { subject, publicKey: keys.pub, privateKey: keys.priv }, TTL: 24 * 3600, timeout: 8000 };
+      const body = JSON.stringify(payload);
+      let sent = 0;
+      await Promise.all(subs.map(async s => {
+        try { await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, body, opts); sent++; }
+        catch (e) {
+          if (e && (e.statusCode === 404 || e.statusCode === 410)) await q('DELETE FROM push_subscriptions WHERE id = $1', [s.id]).catch(() => {});
+          else console.warn('push failed:', e && (e.statusCode || e.message));
+        }
+      }));
+      return { sent };
+    } catch (e) { console.warn('push error:', e && e.message); return { sent: 0 }; }
+  }
+  // A new announcement goes to every device with notifications on (except the poster's own, when known).
+  async function pushAnnouncement(ann, skipStaffId = 0) {
+    try {
+      const subs = await q('SELECT * FROM push_subscriptions WHERE staff_id IS NULL OR staff_id <> $1', [skipStaffId]);
+      const biz = await db.getSetting('business_name', 'Daily Board');
+      return await sendPush(subs, { title: `${biz}: new announcement`, body: `${ann.title ? ann.title + ' — ' : ''}${ann.body}`.slice(0, 160), tag: 'ann-' + ann.id, url: '/' });
+    } catch (e) { console.warn('push error:', e && e.message); return { sent: 0 }; }
+  }
+  // A task for named people goes to their devices; a task for everyone goes to every device.
+  async function pushTask(task, assignees, skipStaffId = 0) {
+    try {
+      const subs = assignees.length
+        ? await q('SELECT * FROM push_subscriptions WHERE staff_id = ANY($1::int[]) AND staff_id <> $2', [assignees, skipStaffId])
+        : await q('SELECT * FROM push_subscriptions WHERE staff_id IS NULL OR staff_id <> $1', [skipStaffId]);
+      const biz = await db.getSetting('business_name', 'Daily Board');
+      return await sendPush(subs, { title: `${biz}: new task`, body: `${assignees.length ? 'For you' : 'For everyone'} — ${task.title}`.slice(0, 160), tag: 'task-' + task.id, url: '/' });
+    } catch (e) { console.warn('push error:', e && e.message); return { sent: 0 }; }
+  }
+  // Only real push services may be subscribed (the server will POST to this address).
+  const pushHostOk = u => { try { const h = new URL(u); return h.protocol === 'https:' && /(^|\.)(googleapis\.com|push\.apple\.com|mozilla\.com|windows\.com)$/.test(h.hostname); } catch { return false; } };
+  app.get('/api/push/key', boardAuth, wrap(async (req, res) => {
+    const k = await vapidKeys();
+    res.json({ key: k ? k.pub : '' });
+  }));
+  app.post('/api/push/subscribe', boardAuth, wrap(async (req, res) => {
+    const s = (req.body || {}).subscription || {};
+    const endpoint = String(s.endpoint || ''), p256dh = String((s.keys || {}).p256dh || ''), auth = String((s.keys || {}).auth || '');
+    if (!pushHostOk(endpoint) || endpoint.length > 1000 || !p256dh || !auth) return res.status(400).json({ error: 'That device can\'t receive notifications.' });
+    await q(`INSERT INTO push_subscriptions (endpoint, p256dh, auth, staff_id, user_agent) VALUES ($1,$2,$3,$4,$5)
+      ON CONFLICT (endpoint) DO UPDATE SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth, staff_id = EXCLUDED.staff_id, user_agent = EXCLUDED.user_agent`,
+      [endpoint, p256dh, auth, req.staffId || null, String(req.headers['user-agent'] || '').slice(0, 200)]);
+    res.json({ ok: true });
+  }));
+  app.post('/api/push/unsubscribe', boardAuth, wrap(async (req, res) => {
+    await q('DELETE FROM push_subscriptions WHERE endpoint = $1', [String((req.body || {}).endpoint || '')]);
+    res.json({ ok: true });
+  }));
 
   // Text an announcement to everyone on the roster with a phone (skipping whoever texted it in).
   async function broadcastAnnouncement(ann, skipPhoneKey = '') {
@@ -746,6 +820,7 @@ function mount(app, deps) {
       id = (await one(`INSERT INTO tasks (kind, title, detail, day_of_week, due_date, sort, active, source, created_by, assign, assignees)
         VALUES ($1,$2,$3,$4,$5,$6,$7,'manual',$8,$9,$10) RETURNING id`, [kind, title, detail, dow, due, sort, active, by, assign, JSON.stringify(assignees)])).id;
       if (assign === 'each' && active && !isOff(b.notify)) {
+        await pushTask({ id, title }, assignees);
         const { sent } = await notifyTask({ id, kind, title, day_of_week: dow }, assignees);
         return res.json({ ok: true, id, notified: sent });
       }
@@ -769,6 +844,7 @@ function mount(app, deps) {
     else {
       id = (await one(`INSERT INTO announcements (title, body, media_url, pinned, expires_on, active, source, created_by)
         VALUES ($1,$2,$3,$4,$5,$6,'manual',$7) RETURNING id`, [title, body, media, pinned, expires, active, by])).id;
+      if (active) await pushAnnouncement({ id, title, body });
       const want = b.text_everyone != null ? !isOff(b.text_everyone) : await db.getSetting('sms_broadcast', '0') === '1';
       if (want && active) { const { sent } = await broadcastAnnouncement({ id, title, body, media_url: media }); return res.json({ ok: true, id, notified: sent }); }
     }
@@ -937,6 +1013,7 @@ function mount(app, deps) {
         VALUES ('', $1, $2, 0, 1, 'sms', $3) RETURNING id`, [cmd.text || '(photo)', media, sender.name]);
       action = 'announcement'; targetId = row.id;
       msg = `Posted to announcements ✓${media ? ' (with photo)' : ''}`;
+      await pushAnnouncement({ id: row.id, title: '', body: cmd.text || '(photo)' }, sender.id);
       if (await db.getSetting('sms_broadcast', '0') === '1') {
         const { sent } = await broadcastAnnouncement({ id: row.id, title: '', body: cmd.text || '(photo)', media_url: media }, key);
         if (sent) msg += ` Texted ${sent} ${sent === 1 ? 'person' : 'people'}.`;
@@ -958,6 +1035,7 @@ function mount(app, deps) {
       msg = (cmd.kind === 'once' ? "Added to today's tasks" : cmd.kind === 'daily' ? 'Added as a daily task'
         : `Added as a weekly task${cmd.dow != null ? ` (due ${DOW_SHORT[cmd.dow]})` : ''}`) + whoNote + ' ✓';
       if (assign === 'each') {
+        await pushTask({ id: row.id, title: cmd.text.slice(0, 200) }, assignees, sender.id);
         const { sent } = await notifyTask({ id: row.id, kind: cmd.kind, title: cmd.text.slice(0, 200), day_of_week: cmd.dow ?? null }, assignees, key);
         if (sent) msg += ` Texted ${sent} ${sent === 1 ? 'person' : 'people'}.`;
       }
