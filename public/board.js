@@ -116,7 +116,7 @@ function applyBranding(b) {
 function renderLogin(err) {
   stopTimers();
   document.getElementById('topRight').textContent = '';
-  document.getElementById('refreshBtn').hidden = true;
+  document.getElementById('refreshBtn').hidden = true; document.getElementById('bellBtn').hidden = true;
   $app.innerHTML = `<div class="login">
     <div class="hero">${cfg.logo ? `<img src="${attr(cfg.logo)}" alt="">` : ''}<div><h1>${esc(cfg.business_name || 'Daily Board')}</h1>${cfg.tagline ? `<div class="tagline">${esc(cfg.tagline)}</div>` : ''}</div></div>
     <p class="lead">${esc(cfg.welcome_text || "The team's shared screen: today's sales goals, the daily and weekly checklists, and announcements from management — every item signed off by whoever handled it.")}</p>
@@ -209,6 +209,61 @@ window.refreshNow = refreshNow;
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refreshNow({ quiet: true }); });
 window.addEventListener('pageshow', e => { if (e.persisted) refreshNow({ quiet: true }); });
 window.addEventListener('online', () => refreshNow({ quiet: true }));
+// ---------- app notifications (push) ----------
+// The bell in the top bar turns them on for this device. A device signed in with someone's own PIN is
+// tied to that person, so "a task was assigned to you" alerts can find it. iPhones only allow this
+// from the installed (home-screen) app.
+let pushKey = null, pushOn = false, pushOwner = null;
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const pushReg = () => navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.ready);
+function keyBytes(s) { const raw = atob((s + '='.repeat((4 - s.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/')); return Uint8Array.from(raw, c => c.charCodeAt(0)); }
+async function initPush() {
+  const bell = document.getElementById('bellBtn'); if (!bell) return;
+  try {
+    if (pushKey === null) pushKey = (await api('/api/push/key')).key || '';
+    bell.hidden = !pushKey;
+    if (!pushKey) return;
+    pushOn = false;
+    if (pushSupported() && Notification.permission === 'granted') {
+      const sub = await (await pushReg()).pushManager.getSubscription();
+      if (sub) {
+        const owner = data && data.me ? data.me.id : 0;
+        if (pushOwner !== owner) { await api('/api/push/subscribe', { subscription: sub.toJSON() }); pushOwner = owner; }   // keeps the device tied to whoever is signed in
+        pushOn = true;
+      }
+    }
+    bell.textContent = pushOn ? '🔔' : '🔕';
+    bell.title = pushOn ? 'Notifications are on — tap to turn off' : 'Turn on notifications';
+  } catch { /* notifications are optional */ }
+}
+window.toggleNotifications = async () => {
+  if (!pushSupported()) {
+    alert(/iPhone|iPad|iPod/.test(navigator.userAgent) && !(navigator.standalone || matchMedia('(display-mode: standalone)').matches)
+      ? 'To get notifications on an iPhone or iPad, first install the app: tap the Share button, choose "Add to Home Screen", then open it from your home screen and tap the bell again.'
+      : "This browser can't show app notifications.");
+    return;
+  }
+  try {
+    if (pushOn) {
+      const sub = await (await pushReg()).pushManager.getSubscription();
+      if (sub) { await api('/api/push/unsubscribe', { endpoint: sub.endpoint }); await sub.unsubscribe(); }
+      pushOwner = null; showHint('Notifications off'); return initPush();
+    }
+    let perm = Notification.permission;
+    if (perm === 'default') perm = await Notification.requestPermission();   // straight from the tap — iPhones insist
+    if (perm === 'denied') { alert('Notifications are blocked for this app. Allow them in your phone\'s settings (Settings → Notifications → this app), then tap the bell again.'); return; }
+    if (perm !== 'granted') { showHint('Notifications not allowed'); return; }
+    const reg = await pushReg();
+    const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(pushKey) });
+    const out = await api('/api/push/subscribe', { subscription: sub.toJSON() });
+    if (out.error) { await sub.unsubscribe(); alert(out.error); return; }
+    pushOwner = data && data.me ? data.me.id : 0;
+    showHint(pushOwner ? 'Notifications on' : 'Notifications on — sign in with your own PIN to also get your personal tasks');
+    initPush();
+  } catch (e) { alert("Couldn't change notifications: " + ((e && e.message) || e)); }
+};
+if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => { if (e.data && e.data.type === 'refresh') refreshNow({ quiet: true }); });
+
 // Pull down from the top of the page to refresh.
 let pullStart = null, pullDy = 0;
 document.addEventListener('touchstart', e => {
@@ -224,7 +279,7 @@ document.addEventListener('touchcancel', () => { pullStart = null; pullDy = 0; }
 
 function render() {
   if (mgr) return renderManager();
-  startTimers(); syncRefreshBtn();
+  startTimers(); syncRefreshBtn(); initPush();
   document.getElementById('topRight').textContent = data.is_manager ? 'Manager' : data.me ? data.me.name : '';
   const isToday = viewDate === data.today, isFuture = viewDate > data.today;
   const canSign = !isFuture;
