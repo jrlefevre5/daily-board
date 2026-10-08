@@ -983,6 +983,29 @@ window.clearSchedule = async templateId => {
 window.delGoalDay = async id => { if (confirm('Remove this goal from the day (and anything logged toward it)?')) { await api('/api/manager/goal', { id, remove: true }); reloadMgr(); } };
 
 function mgrTasks() {
+  const st = {}; for (const s of mgr.task_state || []) st[s.id] = s;
+  const kindLabel = { daily: 'Daily', weekly: 'Weekly', once: 'One-time' };
+  const row = (t, mode) => { const s = st[t.id];
+    return `<tr class="${t.active ? '' : 'off'}"><td>${esc(t.title)} ${onoff(t.active)}${t.detail ? `<div class="mini">${esc(t.detail)}</div>` : ''}</td>
+      <td class="mini">${kindLabel[t.kind] || t.kind}${t.kind === 'weekly' ? ' · ' + (t.day_of_week != null ? DOW_SHORT[t.day_of_week] : 'any day') : t.kind === 'once' ? ' · ' + esc(fmtShort(t.due_date)) : ''}</td>
+      <td class="mini">${esc(whoLabel(t))}</td>
+      <td class="mini">${mode === 'done' ? `✓ ${esc((s.by || []).join(', ') || 'done')}` : mode === 'todo' && s && s.by.length ? `${s.by.length} of ${s.needs} signed: ${esc(s.by.join(', '))}` : mode === 'other' ? (t.active ? 'Not on today\'s board' : 'Switched off') : '—'}</td>
+      <td class="mini">${esc(t.created_by)}${t.source === 'sms' ? ' <span class="chip sms">text</span>' : ''}</td>
+      <td class="acts"><button class="mini-btn" onclick="editTask(${t.id})">Edit</button> <button class="mini-btn danger" onclick="delTask(${t.id})">Delete</button></td></tr>`; };
+  const table = (rows, mode, empty) => `<table class="list"><tr><th>Task</th><th>Type</th><th>Who</th><th>${mode === 'done' ? 'Done by' : mode === 'todo' ? 'Progress' : 'Status'}</th><th>By</th><th></th></tr>
+      ${rows.map(t => row(t, mode)).join('') || `<tr><td colspan="6" class="empty">${empty}</td></tr>`}</table>`;
+  const onBoard = mgr.tasks.filter(t => t.active && st[t.id]);
+  const todo = onBoard.filter(t => !st[t.id].done), done = onBoard.filter(t => st[t.id].done), other = mgr.tasks.filter(t => !(t.active && st[t.id]));
+  return `<div class="tools"><div class="spacer"></div><button class="small" onclick="editTask()">+ Add task</button></div>
+    <p class="kicker-note">Today's board, split by what's still open and what's finished. Daily tasks reset each day, weekly tasks each week.</p>
+    <div class="tools" style="margin-top:14px"><b>Not completed</b><span class="mini">${todo.length} still open today</span></div>
+    ${table(todo, 'todo', 'Everything on today\'s board is done ✓')}
+    <div class="tools" style="margin-top:18px"><b>Completed</b><span class="mini">${done.length} done (the Activity tab keeps the full history with signatures)</span></div>
+    ${table(done, 'done', 'Nothing completed yet today.')}
+    <div class="tools" style="margin-top:18px"><b>Not on today's board</b><span class="mini">One-time tasks for other days, and switched-off tasks</span></div>
+    ${table(other, 'other', 'None.')}`;
+}
+function mgrTasksByKind() {
   const groups = [['daily', 'Daily tasks', 'Reset every day.'], ['weekly', 'Weekly tasks', 'Signed once per week (Mon–Sun); optionally due on a weekday.'], ['once', 'One-time tasks', 'Show up on one day only — this is where texted-in TASKs land.']];
   return `<div class="tools"><div class="spacer"></div><button class="small" onclick="editTask()">+ Add task</button></div>
     ${groups.map(([kind, title, note]) => {
@@ -1073,7 +1096,7 @@ function mgrStaff() {
     <div class="tools"><div class="spacer"></div><button class="small" onclick="editStaff()">+ Add person</button></div>
     <p class="mini" style="margin:-6px 0 12px">Text opt-in page for staff (also what Twilio asks for as the opt-in policy): <code class="url">${esc(location.origin + '/sms.html')}</code></p>
     <table class="list"><tr><th>Name</th><th>Role</th><th>Phone</th><th>Texts</th><th>PIN</th><th></th></tr>
-      ${mgr.staff.map(s => `<tr class="${s.active ? '' : 'off'}"><td>${esc(s.name)} ${onoff(s.active)}${s.skip_ann ? ' <span class="chip" title="Not tracked reading announcements">no reads</span>' : ''}${s.skip_tasks ? ' <span class="chip" title="Not part of tasks for everyone">no team tasks</span>' : ''}</td><td>${s.role}</td><td>${esc(s.phone)}</td>
+      ${mgr.staff.map(s => `<tr class="${s.active ? '' : 'off'}"><td>${esc(s.name)} ${onoff(s.active)}${s.skip_ann ? ' <span class="chip" title="Not tracked reading announcements">no reads</span>' : ''}${s.skip_tasks ? ' <span class="chip" title="Not part of tasks for everyone">no team tasks</span>' : ''}${s.n_ann === false || s.n_tasks === false || s.n_hl === false || (s.role === 'manager' && s.n_done === false) ? ' <span class="chip" title="Some notifications are turned off for this person">alerts off</span>' : ''}</td><td>${s.role}</td><td>${esc(s.phone)}</td>
         <td class="mini">${!s.phone ? '—' : s.sms_consent_at ? `<span class="chip sms">opted in</span> ${esc(fmtShort(String(s.sms_consent_at).slice(0, 10)))}` : 'added by manager'}</td><td>${s.pin_shared ? '<span class="chip due">shared</span>' : s.has_pin ? 'set' : s.active ? '<span class="chip due">none</span>' : '—'}</td>
         <td class="acts"><button class="mini-btn" onclick="editStaff(${s.id})">Edit</button> <button class="mini-btn danger" onclick="delStaff(${s.id})">Delete</button></td></tr>`).join('')
         || '<tr><td colspan="6" class="empty">No one yet — until you add people, the board asks signers to type their name.</td></tr>'}
@@ -1088,11 +1111,16 @@ window.editStaff = id => {
     { k: 'pin', l: id ? 'New PIN (blank = keep current)' : 'PIN (4–8 digits, unique to this person)', v: '', type: 'password', ph: id && s.has_pin ? '••••' : '', gen: true,
       hint: 'Their personal PIN is how they sign things off. PINs are never shown again after saving — write it down for them, or reset it here.' },
     ...(id ? [{ k: 'clear_pin', l: 'Remove PIN', v: '0', type: 'select', opts: [['0', 'No'], ['1', 'Yes — no PIN needed']] }] : []),
+    { k: 'n_ann', l: 'Notify: new announcements', v: s.n_ann === false ? '0' : '1', type: 'select', opts: [['1', 'Yes'], ['0', 'No — no notification or text']] },
+    { k: 'n_tasks', l: 'Notify: tasks for them / for everyone', v: s.n_tasks === false ? '0' : '1', type: 'select', opts: [['1', 'Yes'], ['0', 'No — no notification or text']] },
+    { k: 'n_hl', l: 'Notify: shift highlights & shoutouts', v: s.n_hl === false ? '0' : '1', type: 'select', opts: [['1', 'Yes'], ['0', 'No']] },
+    ...(s.role === 'manager' ? [{ k: 'n_done', l: 'Notify: a task was completed (managers)', v: s.n_done === false ? '0' : '1', type: 'select', opts: [['1', 'Yes'], ['0', 'No']] }] : []),
     { k: 'skip_ann', l: 'Exempt from marking announcements read', v: s.skip_ann ? '1' : '0', type: 'select', opts: [['0', 'No — has to read them'], ['1', 'Yes — exempt']] },
     { k: 'skip_tasks', l: 'Exempt from tasks assigned to everyone', v: s.skip_tasks ? '1' : '0', type: 'select', opts: [['0', 'No — has to do them'], ['1', 'Yes — exempt (still gets tasks given to them by name)']] },
     { k: 'active', l: 'Active', v: s.active ? '1' : '0', type: 'select', opts: [['1', 'Yes'], ['0', 'No — hidden from the board']] },
   ], f => {
-    const body = { id, name: f.name, role: f.role, phone: f.phone, active: f.active === '1', skip_ann: f.skip_ann === '1', skip_tasks: f.skip_tasks === '1' };
+    const body = { id, name: f.name, role: f.role, phone: f.phone, active: f.active === '1', skip_ann: f.skip_ann === '1', skip_tasks: f.skip_tasks === '1', n_ann: f.n_ann !== '0', n_tasks: f.n_tasks !== '0', n_hl: f.n_hl !== '0' };
+    if (f.n_done != null) body.n_done = f.n_done !== '0';
     if (f.clear_pin === '1') body.pin = ''; else if (f.pin) body.pin = f.pin;
     return api('/api/manager/staff', body);
   });
@@ -1262,6 +1290,8 @@ function mgrSettings() {
     ${f('st_pin', 'Manager PIN', s.manager_pin, 'Unlocks this panel. Change it from the default!')}
     <b style="display:block;margin-top:22px">Announcements</b>
     ${f('st_annDays', 'Hide announcements after (days)', s.announce_days, '0 = never. They leave the board on their own after this many days and move to the archive on the Announcements tab (with who read them). Pinned ones stay; a "Hide after" date on an announcement wins.', 'type="number" min="0" max="365"')}
+    <b style="display:block;margin-top:22px">Shift highlights &amp; shoutouts</b>
+    ${f('st_hlDays', 'Keep highlights on the board for (days)', s.highlight_days, '0 = keep showing the latest ones. After this many days they leave the board but stay in the manager Highlights tab (90 days).', 'type="number" min="0" max="365"')}
     <b style="display:block;margin-top:22px">Spreadsheet (goal actuals)</b>
     ${f('st_sheet', 'Spreadsheet link', s.sheet_url, 'Share the Excel file as "Anyone with the link can view" (OneDrive / SharePoint), or publish a Google Sheet to the web as CSV, then paste the link. Anyone with the link can read the sheet — keep it private. Then, on a goal under Goals, choose "Fill the actual from the spreadsheet" and say which columns to use.', 'placeholder="https://…"')}
     <div class="help" id="st_sheet_status">${sheetStatusHtml(s.sheet_status)}</div>
@@ -1328,7 +1358,7 @@ window.saveSettings = async () => {
   if (g('st_reqpin') === '1' && !mgr.settings.require_pin && (pi.missing || pi.shared) &&
       !confirm(`${pi.missing} active ${pi.missing === 1 ? 'person has' : 'people have'} no PIN and ${pi.shared} ${pi.shared === 1 ? 'has' : 'have'} a shared PIN. They won't be able to sign anything until they get one. Turn it on anyway?`)) return;
   const out = await api('/api/manager/settings', {
-    timezone: g('st_tz'), board_pass: g('st_pass'), manager_pin: g('st_pin'), require_pin: g('st_reqpin'), announce_days: g('st_annDays'), sheet_url: g('st_sheet'), sms_number: g('st_num'), sms_default_kind: g('st_kind'), sms_reply: g('st_reply'), sms_notify: g('st_notify'), sms_broadcast: g('st_bcast'),
+    timezone: g('st_tz'), board_pass: g('st_pass'), manager_pin: g('st_pin'), require_pin: g('st_reqpin'), announce_days: g('st_annDays'), highlight_days: g('st_hlDays'), sheet_url: g('st_sheet'), sms_number: g('st_num'), sms_default_kind: g('st_kind'), sms_reply: g('st_reply'), sms_notify: g('st_notify'), sms_broadcast: g('st_bcast'),
   });
   if (out.error) { document.getElementById('st_err').textContent = out.error; return; }
   if (out.token) { mgrToken = out.token; localStorage.setItem('db_mgr_token', mgrToken); }
