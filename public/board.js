@@ -140,7 +140,7 @@ window.boardLogin = async () => {
   if (!p) return;
   const out = await api('/api/login', { code: p });
   if (!out.token) { document.getElementById('bl_err').textContent = out.error || 'Wrong password or PIN.'; return; }
-  if (out.role === 'manager') { mgrToken = out.token; localStorage.setItem('db_mgr_token', mgrToken); }
+  if (out.role === 'manager') { mgrToken = out.token; localStorage.setItem('db_mgr_token', mgrToken); if (out.name) window.setMgrName(out.name); }   // a staff manager's own PIN also fills in their name for posts
   else { boardToken = out.token; localStorage.setItem('db_board_token', boardToken); }
   await loadBoard();
 };
@@ -149,7 +149,7 @@ window.managerLogin = async prefix => {
   if (!pin) return;
   const out = await api('/api/login', { manager_pin: pin });
   if (!out.token) { document.getElementById(`${prefix}_err`).textContent = out.error || 'Wrong PIN.'; return false; }
-  mgrToken = out.token; localStorage.setItem('db_mgr_token', mgrToken);
+  mgrToken = out.token; localStorage.setItem('db_mgr_token', mgrToken); if (out.name) window.setMgrName(out.name);
   if (prefix === 'ml') await loadBoard();
   return true;
 };
