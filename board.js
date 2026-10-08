@@ -10,6 +10,8 @@ const express = require('express');
 // App notifications (Web Push). If the package isn't installed the board still runs; notifications just stay off.
 let webpush = null;
 try { webpush = require('web-push'); } catch { /* notifications unavailable */ }
+const zlib = require('zlib');
+const sheet = require('./sheet');   // reads the Excel workbook / CSV that goal actuals can come from
 
 const DOW_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const DOW_MATCH = [/^sun/, /^mon/, /^tue/, /^wed/, /^thu/, /^fri/, /^sat/];
@@ -228,6 +230,50 @@ function mount(app, deps) {
   // announcement's own "Hide after" date wins. They're kept — with who read them — in the manager portal.
   const announceDays = async () => { const n = Math.round(Number(await db.getSetting('announce_days', '7'))); return Number.isFinite(n) ? Math.max(0, Math.min(365, n)) : 7; };
 
+  // ---------- goal actuals from a spreadsheet ----------
+  // A manager pastes an "Anyone with the link can view" OneDrive / SharePoint (or published Google Sheet) link in
+  // Settings; goals mapped to it take their actual from the sheet (the sheet is the truth) and re-read it every few minutes.
+  const inflateRaw = buf => new Promise((resolve, reject) => zlib.inflateRaw(buf, (e, out) => (e ? reject(e) : resolve(out))));
+  async function fetchWorkbook(link) {
+    const url = sheet.downloadUrl(link);
+    if (!url) throw new Error("That isn't a OneDrive, SharePoint or Google Sheets share link.");
+    const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), 12000);
+    try {
+      const r = await fetch(url, { signal: ctrl.signal, redirect: 'follow', headers: { 'User-Agent': 'Mozilla/5.0 (DailyBoard)' } });
+      if (!r.ok) throw new Error(`The link answered with an error (HTTP ${r.status}). Check it's shared as "Anyone with the link can view".`);
+      const buf = Buffer.from(await r.arrayBuffer());
+      if (buf.length > 15_000_000) throw new Error('That file is too large (over 15 MB).');
+      return await sheet.parseWorkbook(buf, inflateRaw);
+    } catch (e) {
+      throw new Error(e && e.name === 'AbortError' ? 'The link took too long to answer.' : (e && e.message) || 'Could not read the link.');
+    } finally { clearTimeout(timer); }
+  }
+  // Read the sheet and update every linked goal's number for today / this month. Failures keep the last good numbers.
+  async function syncSheet({ force = false } = {}) {
+    const link = (await db.getSetting('sheet_url', '')).trim();
+    if (!link) return { ok: true, skipped: true, goals: [] };
+    if (!force && Date.now() - Number(await db.getSetting('sheet_tried', '0')) < 5 * 60 * 1000) return { ok: true, skipped: true, goals: [] };
+    await db.setSetting('sheet_tried', String(Date.now()));   // also holds off other server instances
+    const status = { at: new Date().toISOString(), ok: true, error: '', goals: [] };
+    try {
+      const wb = await fetchWorkbook(link);
+      const todayStr = await today();
+      await materializeGoals(todayStr, todayStr);
+      for (const t of await q("SELECT * FROM goal_templates WHERE active = 1 AND sheet_map <> ''")) {
+        try {
+          const map = JSON.parse(t.sheet_map);
+          const { value, rows } = sheet.readValue(wb, map, t.period, t.period === 'month' ? todayStr.slice(0, 7) : todayStr);
+          await q('UPDATE goals SET sheet_actual = $3, sheet_at = now() WHERE template_id = $1 AND date = $2', [t.id, t.period === 'month' ? todayStr.slice(0, 7) + '-01' : todayStr, value]);
+          status.goals.push({ label: t.label, value, rows });
+        } catch (e) { status.ok = false; status.goals.push({ label: t.label, error: String((e && e.message) || e).slice(0, 200) }); }
+      }
+    } catch (e) { status.ok = false; status.error = String((e && e.message) || e).slice(0, 300); }
+    await db.setSetting('sheet_status', JSON.stringify(status));
+    return status;
+  }
+  // Checked whenever the board loads, but only does work every few minutes, and never holds the board up for long.
+  const maybeSyncSheet = () => Promise.race([syncSheet().catch(() => {}), new Promise(r => setTimeout(r, 4000))]);
+
   // ---------- app notifications (Web Push) ----------
   // The VAPID key pair identifies this server to the phones' push services. It's created once and
   // kept in the settings table (like the sign-in secret); one row so two instances can't disagree.
@@ -377,10 +423,12 @@ function mount(app, deps) {
     const todayStr = await today();
     const ws = weekStart(date), dow = dowOf(date);
     await materializeGoals(date, todayStr);
+    await maybeSyncSheet();   // goals linked to a spreadsheet pick up its latest numbers (every few minutes)
     const annDays = await announceDays();
     const [goals, entries, staff, tasks, completions, anns, acks, settings] = await Promise.all([
       // This day's daily goals, plus the monthly goals for the month it falls in.
-      q("SELECT * FROM goals WHERE (period = 'day' AND date = $1) OR (period = 'month' AND date = $2) ORDER BY sort, id", [date, date.slice(0, 7) + '-01']),
+      q(`SELECT g.*, (COALESCE(t.sheet_map, '') <> '') AS linked FROM goals g LEFT JOIN goal_templates t ON t.id = g.template_id
+         WHERE (g.period = 'day' AND g.date = $1) OR (g.period = 'month' AND g.date = $2) ORDER BY g.sort, g.id`, [date, date.slice(0, 7) + '-01']),
       q(`SELECT e.goal_id, e.amount, e.staff_name, e.note, e.created_at FROM goal_entries e
          JOIN goals g ON g.id = e.goal_id WHERE (g.period = 'day' AND g.date = $1) OR (g.period = 'month' AND g.date = $2) ORDER BY e.id`, [date, date.slice(0, 7) + '-01']),
       q('SELECT id, name, role, pin FROM staff WHERE active = 1 ORDER BY name'),
@@ -426,7 +474,8 @@ function mount(app, deps) {
       staff: staff.map(s => ({ id: s.id, name: s.name, role: s.role, has_pin: !!s.pin })),
       goals: goals.map(g => ({ id: g.id, label: g.label, unit: g.unit, target: Number(g.target), baseline: g.baseline == null ? null : Number(g.baseline),
         period: g.period, month: g.period === 'month' ? g.date.slice(0, 7) : null,
-        actual: (byGoal[g.id] || []).reduce((s, e) => s + e.amount, 0),
+        linked: !!g.linked, sheet_at: g.sheet_at || null,   // linked = the actual comes from the spreadsheet
+        actual: g.linked && g.sheet_actual != null ? Number(g.sheet_actual) : (byGoal[g.id] || []).reduce((s, e) => s + e.amount, 0),
         entries: g.period === 'month' ? (byGoal[g.id] || []).slice(-5) : byGoal[g.id] || [] })),   // a month can hold hundreds of entries; the board only needs the latest
       tasks_today, tasks_week,
       announcements: anns.map(a => ({ id: a.id, title: a.title, body: a.body, media_url: a.media_url, pinned: !!a.pinned,
@@ -624,6 +673,8 @@ function mount(app, deps) {
     if (b.kind === 'goal') {
       const g = await one('SELECT * FROM goals WHERE id = $1', [id]);
       if (!g) return res.status(404).json({ error: 'That goal is gone.' });
+      const link = g.template_id ? await one('SELECT sheet_map FROM goal_templates WHERE id = $1', [g.template_id]) : null;
+      if (link && link.sheet_map) return res.status(400).json({ error: 'This goal is filled in from the spreadsheet — there is nothing to log.' });
       const amount = Math.round(num(b.amount) * 100) / 100;
       if (!amount) return res.status(400).json({ error: 'Enter how much to add (a whole number or dollar amount).' });
       if (Math.abs(amount) > 1e9) return res.status(400).json({ error: 'That amount is too large.' });
@@ -710,7 +761,7 @@ function mount(app, deps) {
       goal_schedule, tasks, announcements: announcementsOut, sms_log, completions, goal_entries: entries,
       branding: await db.branding(),
       settings: {
-        timezone: s.timezone || '', announce_days: annDays,
+        timezone: s.timezone || '', announce_days: annDays, sheet_url: s.sheet_url || '', sheet_status: (() => { try { return s.sheet_status ? JSON.parse(s.sheet_status) : null; } catch { return null; } })(),
         board_pass: s.board_pass || '', manager_pin: s.manager_pin || '', require_pin: s.require_pin === '1',
         sms_number: s.sms_number || '', sms_default_kind: s.sms_default_kind || 'announcement', sms_reply: s.sms_reply !== '0',
         sms_secured: !!(process.env.TWILIO_AUTH_TOKEN || process.env.SMS_WEBHOOK_SECRET),
@@ -774,9 +825,24 @@ function mount(app, deps) {
     const unit = b.unit === 'dollars' ? 'dollars' : 'count';
     const period = b.period === 'month' ? 'month' : 'day';
     const target = Math.max(0, num(b.target)), sort = num(b.sort), active = isOff(b.active) ? 0 : 1;
+    // Optional: fill this goal's actual from the spreadsheet (where in the sheet to look).
+    let sheetMap = '';
+    if (b.sheet_on === '1' || b.sheet_on === true) {
+      const col = v => (/^[A-Za-z]{1,3}$/.test(String(v || '').trim()) ? String(v).trim().toUpperCase() : '');
+      const map = { tab: clean(b.sheet_tab, 80), mode: b.sheet_mode === 'cell' ? 'cell' : 'rows' };
+      if (map.mode === 'cell') {
+        map.cell = String(b.sheet_cell || '').trim().toUpperCase();
+        if (!/^[A-Z]{1,3}\d{1,7}$/.test(map.cell)) return res.status(400).json({ error: 'Enter the spreadsheet cell like D2.' });
+      } else {
+        map.dateCol = col(b.sheet_date_col); map.valueCol = col(b.sheet_value_col); map.firstRow = Math.max(1, Math.round(num(b.sheet_first_row)) || 2);
+        if (!map.dateCol || !map.valueCol) return res.status(400).json({ error: 'Enter the date column and the value column as letters (like A and C).' });
+      }
+      sheetMap = JSON.stringify(map);
+    }
     let id = Number(b.id) || 0;
-    if (id) await q('UPDATE goal_templates SET label=$2, unit=$3, target=$4, sort=$5, active=$6, period=$7 WHERE id=$1', [id, label, unit, target, sort, active, period]);
-    else id = (await one('INSERT INTO goal_templates (label, unit, target, sort, active, period) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id', [label, unit, target, sort, active, period])).id;
+    if (id) await q('UPDATE goal_templates SET label=$2, unit=$3, target=$4, sort=$5, active=$6, period=$7, sheet_map=$8 WHERE id=$1', [id, label, unit, target, sort, active, period, sheetMap]);
+    else id = (await one('INSERT INTO goal_templates (label, unit, target, sort, active, period, sheet_map) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id', [label, unit, target, sort, active, period, sheetMap])).id;
+    if (!sheetMap) await q('UPDATE goals SET sheet_actual = NULL, sheet_at = NULL WHERE template_id = $1', [id]);   // unlinked: back to logged entries
     // Today's (or this month's) copy follows the template right away (past days and months keep their history).
     const todayStr = await today(), monthStart = todayStr.slice(0, 7) + '-01';
     const noEntries = 'NOT EXISTS (SELECT 1 FROM goal_entries e WHERE e.goal_id = goals.id)';
@@ -787,7 +853,22 @@ function mount(app, deps) {
         ON CONFLICT (date, template_id) WHERE template_id IS NOT NULL DO UPDATE SET label = EXCLUDED.label, unit = EXCLUDED.unit, target = EXCLUDED.target, sort = EXCLUDED.sort, period = EXCLUDED.period`,
         [period === 'month' ? monthStart : todayStr, id, label, unit, target, sort, period]);
     } else await q(`DELETE FROM goals WHERE template_id = $1 AND (date >= $2 OR (period = 'month' AND date >= $3)) AND ${noEntries}`, [id, todayStr, monthStart]);
-    res.json({ ok: true, id });
+    // A newly linked goal reads the spreadsheet right away so its number shows up now.
+    const sync = sheetMap && active ? await Promise.race([syncSheet({ force: true }).catch(() => null), new Promise(r => setTimeout(() => r(null), 8000))]) : null;
+    res.json({ ok: true, id, sync });
+  }));
+
+  // Read the spreadsheet now (the board also does it on its own every few minutes).
+  app.post('/api/manager/sheet-sync', managerOnly, wrap(async (req, res) => {
+    if (!(await db.getSetting('sheet_url', '')).trim()) return res.status(400).json({ error: 'Paste the spreadsheet link under Settings first.' });
+    res.json(await syncSheet({ force: true }));
+  }));
+  // The first rows of every tab of the linked (or just-typed) spreadsheet, so a manager can see which column is which.
+  app.post('/api/manager/sheet-preview', managerOnly, wrap(async (req, res) => {
+    const link = String((req.body || {}).url || (await db.getSetting('sheet_url', ''))).trim();
+    if (!link) return res.status(400).json({ error: 'Paste the spreadsheet link first.' });
+    try { res.json({ tabs: sheet.preview(await fetchWorkbook(link)) }); }
+    catch (e) { res.status(400).json({ error: e.message }); }
   }));
 
   // Import a per-day target schedule for a recurring goal — typically last year's
@@ -968,6 +1049,12 @@ function mount(app, deps) {
         return res.status(400).json({ error: `That ${k === 'board_pass' ? 'board password' : 'manager PIN'} matches an employee's PIN — pick something different.` });
     if (b.require_pin != null) out.require_pin = isOff(b.require_pin) ? '0' : '1';
     if (b.announce_days != null) out.announce_days = String(Math.max(0, Math.min(365, Math.round(num(b.announce_days)))));
+    if (b.sheet_url != null) {
+      const link = clean(b.sheet_url, 1500);
+      if (link && !sheet.downloadUrl(link)) return res.status(400).json({ error: "That isn't a OneDrive, SharePoint or Google Sheets share link (it must start with https://)." });
+      out.sheet_url = link;
+      if (link !== (await db.getSetting('sheet_url', '')).trim()) out.sheet_tried = '0';   // a new link is read right away
+    }
     if (b.sms_number != null) out.sms_number = clean(b.sms_number, 40);
     if (b.sms_default_kind != null) out.sms_default_kind = b.sms_default_kind === 'task' ? 'task' : 'announcement';
     if (b.sms_reply != null) out.sms_reply = isOff(b.sms_reply) ? '0' : '1';

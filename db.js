@@ -86,6 +86,10 @@ ALTER TABLE goals ADD COLUMN IF NOT EXISTS baseline NUMERIC(12,2);   -- e.g. las
 -- every entry logged that month adds to it).
 ALTER TABLE goal_templates ADD COLUMN IF NOT EXISTS period TEXT NOT NULL DEFAULT 'day';
 ALTER TABLE goals ADD COLUMN IF NOT EXISTS period TEXT NOT NULL DEFAULT 'day';
+-- Goals filled in from a spreadsheet: the template says where in the sheet to look (JSON); each goal row keeps the last number read.
+ALTER TABLE goal_templates ADD COLUMN IF NOT EXISTS sheet_map TEXT NOT NULL DEFAULT '';
+ALTER TABLE goals ADD COLUMN IF NOT EXISTS sheet_actual NUMERIC(14,2);
+ALTER TABLE goals ADD COLUMN IF NOT EXISTS sheet_at TIMESTAMPTZ;
 -- Imported per-day targets for a recurring goal (e.g. last year's daily revenue
 -- + 5%). When a day is materialized, its row here overrides the template target.
 CREATE TABLE IF NOT EXISTS goal_schedule (
@@ -230,7 +234,7 @@ END $$;
 `;
 
 // Bump when DDL or defaults change; a mismatch replays the (idempotent) migration.
-const SCHEMA_VERSION = '9';
+const SCHEMA_VERSION = '10';
 
 async function ensureDefaults() {
   const setDefault = (k, v) => q('INSERT INTO settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO NOTHING', [k, v]);

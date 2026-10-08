@@ -36,6 +36,15 @@ page) refreshes on demand.
   month under Manager panel → Goals). Everything logged that month adds up, the card
   shows how it's pacing ("112 to go · 14 days left · about 8 a day · on pace"), and a
   new month starts again from zero. Past months keep their totals.
+- **Actuals from a spreadsheet** — instead of people logging sales, a goal can take its
+  number from an Excel workbook (or CSV). Share the file as *Anyone with the link can
+  view* on OneDrive / SharePoint (or publish a Google Sheet as CSV), paste the link under
+  Settings → Spreadsheet, and use **Preview the file** to see its columns. Then on a goal
+  (Manager panel → Goals) choose *Fill the actual from the spreadsheet* and give the tab and
+  the date / value columns (a row per day — the month's rows are added up — or one cell). The
+  spreadsheet is the truth for those goals: "+ Log" is turned off, the board re-reads the file
+  every few minutes (or press **Read it now**), and if the file can't be read the goals keep
+  their last good numbers and Settings shows what went wrong.
 - **Sales goals** — recurring goals (e.g. *Units sold 25*, *Revenue $1,200*)
   copy onto every new day. Employees tap **+ Log**, pick their name, sign, and
   the goal ticks up. Each entry is recorded with who/when/note.
