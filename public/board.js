@@ -451,8 +451,8 @@ const goalCard = canSign => g => {
     <div class="track"><div class="fill" style="width:${pct}%"></div></div>
     ${pace}
     <div class="foot">
-      <span class="who">${last ? `Last: ${esc(last.staff_name)} +${esc(fmtAmt(last.amount, g.unit))}` : 'Nothing logged yet'}</span>
-      ${canSign ? `<button class="small ${met ? 'green' : ''}" onclick="openSign('goal', ${g.id})">+ Log</button>` : ''}
+      <span class="who">${g.linked ? `From the spreadsheet${g.sheet_at ? ` · updated ${esc(fmtTime(g.sheet_at))}` : ' · waiting for the first read'}` : last ? `Last: ${esc(last.staff_name)} +${esc(fmtAmt(last.amount, g.unit))}` : 'Nothing logged yet'}</span>
+      ${canSign && !g.linked ? `<button class="small ${met ? 'green' : ''}" onclick="openSign('goal', ${g.id})">+ Log</button>` : ''}
     </div>
   </div>`;
 };
@@ -817,7 +817,7 @@ function mgrGoals() {
   return `<p class="kicker-note">Recurring goals copy onto every new day — or, for a <b>monthly</b> goal (e.g. units or revenue for the month), onto every new month — automatically. This month's and today's copies are listed below; edit one there to change just that period.</p>
     <div class="tools"><b>Recurring goals</b><div class="spacer"></div><button class="small" onclick="editGoalTemplate()">+ Add recurring goal</button></div>
     <table class="list"><tr><th>Goal</th><th>Unit</th><th>Repeats</th><th>Target</th><th></th></tr>
-      ${mgr.goal_templates.map(t => `<tr class="${t.active ? '' : 'off'}"><td>${esc(t.label)} ${onoff(t.active)}</td><td>${t.unit}</td><td>${t.period === 'month' ? 'every month' : 'every day'}</td><td>${esc(fmtAmt(t.target, t.unit))} <span class="mini">${t.period === 'month' ? 'per month' : 'per day'}</span></td>
+      ${mgr.goal_templates.map(t => `<tr class="${t.active ? '' : 'off'}"><td>${esc(t.label)} ${onoff(t.active)}${t.sheet_map ? ' <span class="chip sms">spreadsheet</span>' : ''}</td><td>${t.unit}</td><td>${t.period === 'month' ? 'every month' : 'every day'}</td><td>${esc(fmtAmt(t.target, t.unit))} <span class="mini">${t.period === 'month' ? 'per month' : 'per day'}</span></td>
         <td class="acts"><button class="mini-btn" onclick="editGoalTemplate(${t.id})">Edit</button> <button class="mini-btn danger" onclick="delGoalTemplate(${t.id})">Delete</button></td></tr>`).join('')
         || '<tr><td colspan="5" class="empty">None yet — add things like "Units sold", "New accounts", "Revenue"…</td></tr>'}
     </table>
@@ -843,11 +843,19 @@ function mgrGoals() {
 }
 window.editGoalTemplate = id => {
   const t = mgr.goal_templates.find(x => x.id === id) || { label: '', unit: 'count', period: 'day', target: 0, sort: mgr.goal_templates.length + 1, active: 1 };
+  const sm = (() => { try { return JSON.parse(t.sheet_map || '{}'); } catch { return {}; } })();   // where this goal looks in the spreadsheet
   formModal(id ? 'Edit recurring goal' : 'New recurring goal', [
     { k: 'label', l: 'Goal', v: t.label, ph: 'e.g. Units sold' },
     { k: 'unit', l: 'Unit', v: t.unit, type: 'select', opts: [['count', 'Units / count (e.g. 5 sales)'], ['dollars', 'Revenue — dollars ($)']] },
     { k: 'period', l: 'Repeats', v: t.period || 'day', type: 'select', opts: [['day', 'Every day — a new target each day'], ['month', 'Every month — one target for the whole month']] },
     { k: 'target', l: 'Target (per day, or per month for a monthly goal)', v: t.target, type: 'number' },
+    { k: 'sheet_on', l: 'Fill the actual from the spreadsheet?', v: t.sheet_map ? '1' : '0', type: 'select', opts: [['0', 'No — people log it on the board'], ['1', 'Yes — the spreadsheet is the truth (link it under Settings; logging is turned off)']] },
+    { k: 'sheet_tab', l: 'Spreadsheet tab (blank = the first tab)', v: sm.tab || '' },
+    { k: 'sheet_mode', l: 'Layout', v: sm.mode || 'rows', type: 'select', opts: [['rows', 'A row per day — add up this month\'s rows (or today\'s row, for a daily goal)'], ['cell', 'One cell holds the number']] },
+    { k: 'sheet_date_col', l: 'Date column (a letter, e.g. A)', v: sm.dateCol || '' },
+    { k: 'sheet_value_col', l: 'Value column (a letter, e.g. C)', v: sm.valueCol || '' },
+    { k: 'sheet_first_row', l: 'First data row (skips the header)', v: sm.firstRow || 2, type: 'number' },
+    { k: 'sheet_cell', l: 'Cell, for the one-cell layout (e.g. D2)', v: sm.cell || '' },
     { k: 'sort', l: 'Order', v: t.sort, type: 'number' },
     { k: 'active', l: 'Active', v: t.active ? '1' : '0', type: 'select', opts: [['1', 'Yes — on the board every day'], ['0', 'No — paused']] },
   ], f => api('/api/manager/goal-template', { id, ...f, active: f.active === '1' }));
@@ -1196,6 +1204,10 @@ function mgrSettings() {
     ${f('st_pin', 'Manager PIN', s.manager_pin, 'Unlocks this panel. Change it from the default!')}
     <b style="display:block;margin-top:22px">Announcements</b>
     ${f('st_annDays', 'Hide announcements after (days)', s.announce_days, '0 = never. They leave the board on their own after this many days and move to the archive on the Announcements tab (with who read them). Pinned ones stay; a "Hide after" date on an announcement wins.', 'type="number" min="0" max="365"')}
+    <b style="display:block;margin-top:22px">Spreadsheet (goal actuals)</b>
+    ${f('st_sheet', 'Spreadsheet link', s.sheet_url, 'Share the Excel file as "Anyone with the link can view" (OneDrive / SharePoint), or publish a Google Sheet to the web as CSV, then paste the link. Anyone with the link can read the sheet — keep it private. Then, on a goal under Goals, choose "Fill the actual from the spreadsheet" and say which columns to use.', 'placeholder="https://…"')}
+    <div class="help" id="st_sheet_status">${sheetStatusHtml(s.sheet_status)}</div>
+    <div style="margin-top:6px"><button type="button" class="mini-btn" onclick="sheetPreview()">Preview the file</button> <button type="button" class="mini-btn" onclick="sheetSync()">Read it now</button></div>
     <b style="display:block;margin-top:22px">Signing</b>
     <label for="st_reqpin">Require employee PIN to sign</label>
     <select class="inline" id="st_reqpin" style="width:100%">
@@ -1229,13 +1241,36 @@ function mgrSettings() {
     <div style="margin-top:8px"><button class="small green" onclick="saveSettings()">Save settings</button> <span class="mini" id="st_ok"></span></div>
   </div>`;
 }
+// ---------- spreadsheet link (Settings) ----------
+function sheetStatusHtml(st) {
+  if (!st) return 'Not read yet. Paste a link, save, then use <b>Read it now</b>.';
+  const goals = (st.goals || []).map(g => `<li>${esc(g.label)}: ${g.error ? `<b>problem</b> — ${esc(g.error)}` : `${esc(String(g.value))} <span class="mini">from ${g.rows} row${g.rows === 1 ? '' : 's'}</span>`}</li>`).join('');
+  return `${st.ok ? '✓ Last read fine' : '⚠ Last read had a problem'} · ${esc(fmtStamp(st.at))}${st.error ? `<br><b>${esc(st.error)}</b> — goals keep their last good numbers.` : ''}${goals ? `<ul style="margin:6px 0 0 18px">${goals}</ul>` : ''}`;
+}
+window.sheetPreview = async () => {
+  const url = document.getElementById('st_sheet').value.trim();
+  const out = await api('/api/manager/sheet-preview', url ? { url } : {});
+  if (out.error) { alert(out.error); return; }
+  $modal.innerHTML = `<div class="modal-back" onclick="if(event.target===this)closeModal()"><div class="modal" style="max-width:780px">
+    <h3>What the board sees in your spreadsheet</h3>
+    <p class="sub">The first rows of each tab, with column letters across the top. Dates stored as numbers (like 46296) are understood.</p>
+    ${out.tabs.map(t => `<b>${esc(t.name)}</b> <span class="mini">${t.total} rows</span>
+      <div style="overflow-x:auto;margin-bottom:12px"><table class="list"><tr><th></th>${t.cols.map(c => `<th>${c}</th>`).join('')}</tr>
+        ${t.rows.map((r, i) => `<tr><td class="mini">${i + 1}</td>${r.map(c => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</table></div>`).join('')}
+    <div class="row"><button class="small ghost" onclick="closeModal()">Close</button></div></div></div>`;
+};
+window.sheetSync = async () => {
+  const out = await api('/api/manager/sheet-sync', {});
+  if (out.error) { alert(out.error); return; }
+  await reloadMgr();
+};
 window.saveSettings = async () => {
   const g = id => document.getElementById(id).value.trim();
   const pi = mgr.pin_issues || { missing: 0, shared: 0 };
   if (g('st_reqpin') === '1' && !mgr.settings.require_pin && (pi.missing || pi.shared) &&
       !confirm(`${pi.missing} active ${pi.missing === 1 ? 'person has' : 'people have'} no PIN and ${pi.shared} ${pi.shared === 1 ? 'has' : 'have'} a shared PIN. They won't be able to sign anything until they get one. Turn it on anyway?`)) return;
   const out = await api('/api/manager/settings', {
-    timezone: g('st_tz'), board_pass: g('st_pass'), manager_pin: g('st_pin'), require_pin: g('st_reqpin'), announce_days: g('st_annDays'), sms_number: g('st_num'), sms_default_kind: g('st_kind'), sms_reply: g('st_reply'), sms_notify: g('st_notify'), sms_broadcast: g('st_bcast'),
+    timezone: g('st_tz'), board_pass: g('st_pass'), manager_pin: g('st_pin'), require_pin: g('st_reqpin'), announce_days: g('st_annDays'), sheet_url: g('st_sheet'), sms_number: g('st_num'), sms_default_kind: g('st_kind'), sms_reply: g('st_reply'), sms_notify: g('st_notify'), sms_broadcast: g('st_bcast'),
   });
   if (out.error) { document.getElementById('st_err').textContent = out.error; return; }
   if (out.token) { mgrToken = out.token; localStorage.setItem('db_mgr_token', mgrToken); }
