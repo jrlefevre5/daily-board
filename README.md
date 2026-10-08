@@ -132,6 +132,18 @@ anything can be removed. Neither is required, so there is nothing to track and
 no exemption. This replaces the weekly peer evaluations on the board; the old
 ratings are kept under **Past evaluations**.
 
+## Who gets which notifications
+
+On **Staff → Edit**, each person has on/off choices (all on by default) for:
+new announcements, tasks (for them, or for everyone), shift highlights &
+shoutouts, and — for managers — "task completed" alerts. Turning one off stops
+both the app notification and, for announcements and tasks, the text message.
+Devices signed in with just the board password or manager PIN (no personal PIN)
+can't be told apart, so they always get everything. How long highlights stay on
+the board is **Settings → Shift highlights & shoutouts** (default 7 days, 0 =
+no limit). The manager **Tasks** tab lists today's tasks as *Not completed* and
+*Completed*, with everything else (other days, switched off) below.
+
 ## Exemptions
 
 Everyone has to do everything by default. On **Staff → Edit** you can switch on,

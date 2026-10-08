@@ -230,6 +230,7 @@ function mount(app, deps) {
   // announcement's own "Hide after" date wins. They're kept — with who read them — in the manager portal.
   // Who posted it, for "Announcement from Harold" / "Task from Jason" — generic fallbacks ("Manager") say nothing useful.
   const named = n => { n = String(n || '').trim(); return n && !/^manager(ment)?$/i.test(n) ? n : ''; };
+  const highlightDays = async () => { const n = Math.round(Number(await db.getSetting('highlight_days', '7'))); return Number.isFinite(n) ? Math.max(0, Math.min(365, n)) : 7; };
   const announceDays = async () => { const n = Math.round(Number(await db.getSetting('announce_days', '7'))); return Number.isFinite(n) ? Math.max(0, Math.min(365, n)) : 7; };
 
   // ---------- goal actuals from a spreadsheet ----------
@@ -312,7 +313,8 @@ function mount(app, deps) {
   // A new announcement goes to every device with notifications on (except the poster's own, when known).
   async function pushAnnouncement(ann, skipStaffId = 0) {
     try {
-      const subs = await q('SELECT * FROM push_subscriptions WHERE staff_id IS NULL OR staff_id <> $1', [skipStaffId]);
+      const subs = await q(`SELECT p.* FROM push_subscriptions p LEFT JOIN staff s ON s.id = p.staff_id
+        WHERE (p.staff_id IS NULL OR p.staff_id <> $1) AND COALESCE(s.notify_announcements, true)`, [skipStaffId]);   // each person chooses what they hear about
       const biz = await db.getSetting('business_name', 'Daily Board');
       return await sendPush(subs, { title: named(ann.created_by) ? `Announcement from ${named(ann.created_by)}` : `${biz}: new announcement`, body: `${ann.title ? ann.title + ' — ' : ''}${ann.body}`.slice(0, 160), tag: 'ann-' + ann.id, url: '/' });
     } catch (e) { console.warn('push error:', e && e.message); return { sent: 0 }; }
@@ -321,9 +323,9 @@ function mount(app, deps) {
   async function pushTask(task, assignees, skipStaffId = 0) {
     try {
       const subs = assignees.length
-        ? await q('SELECT * FROM push_subscriptions WHERE staff_id = ANY($1::int[]) AND staff_id <> $2', [assignees, skipStaffId])
+        ? await q('SELECT p.* FROM push_subscriptions p JOIN staff s ON s.id = p.staff_id WHERE p.staff_id = ANY($1::int[]) AND p.staff_id <> $2 AND s.notify_tasks', [assignees, skipStaffId])
         : await q(`SELECT p.* FROM push_subscriptions p LEFT JOIN staff s ON s.id = p.staff_id
-            WHERE (p.staff_id IS NULL OR p.staff_id <> $1) AND NOT COALESCE(s.skip_everyone_tasks, false)`, [skipStaffId]);   // "everyone" leaves out the exempt
+            WHERE (p.staff_id IS NULL OR p.staff_id <> $1) AND NOT COALESCE(s.skip_everyone_tasks, false) AND COALESCE(s.notify_tasks, true)`, [skipStaffId]);   // "everyone" leaves out the exempt
       const biz = await db.getSetting('business_name', 'Daily Board');
       return await sendPush(subs, { title: named(task.created_by) ? `Task from ${named(task.created_by)}` : `${biz}: new task`, body: `${assignees.length ? 'For you' : 'For everyone'} — ${task.title}`.slice(0, 160), tag: 'task-' + task.id, url: '/' });
     } catch (e) { console.warn('push error:', e && e.message); return { sent: 0 }; }
@@ -333,7 +335,7 @@ function mount(app, deps) {
   async function pushTaskDone(task, who, completionId, progress = '') {
     try {
       const subs = await q(`SELECT p.* FROM push_subscriptions p LEFT JOIN staff s ON s.id = p.staff_id
-        WHERE (p.is_manager OR (s.role = 'manager' AND s.active = 1)) AND (p.staff_id IS NULL OR p.staff_id <> $1)`, [who.staff_id || 0]);
+        WHERE (p.is_manager OR (s.role = 'manager' AND s.active = 1)) AND (p.staff_id IS NULL OR p.staff_id <> $1) AND COALESCE(s.notify_done, true)`, [who.staff_id || 0]);
       const biz = await db.getSetting('business_name', 'Daily Board');
       return await sendPush(subs, { title: `${biz}: task completed`, body: `✓ ${who.staff_name} completed: ${task.title}${progress}`.slice(0, 160), tag: 'done-' + completionId, url: '/' });
     } catch (e) { console.warn('push error:', e && e.message); return { sent: 0 }; }
@@ -341,7 +343,8 @@ function mount(app, deps) {
   // A new highlight / shoutout goes to every device with notifications on (except the author's own).
   async function pushHighlight(h, skipStaffId = 0) {
     try {
-      const subs = await q('SELECT * FROM push_subscriptions WHERE staff_id IS NULL OR staff_id <> $1', [skipStaffId]);
+      const subs = await q(`SELECT p.* FROM push_subscriptions p LEFT JOIN staff s ON s.id = p.staff_id
+        WHERE (p.staff_id IS NULL OR p.staff_id <> $1) AND COALESCE(s.notify_highlights, true)`, [skipStaffId]);
       const shout = h.kind === 'shoutout';
       return await sendPush(subs, { title: shout ? `Shoutout: ${h.author_name} → ${h.subject_name}` : `Shift highlight from ${h.author_name}`, body: String(h.body).slice(0, 160), tag: 'hl-' + h.id, url: '/' });
     } catch (e) { console.warn('push error:', e && e.message); return { sent: 0 }; }
@@ -369,7 +372,7 @@ function mount(app, deps) {
   // Text an announcement to everyone on the roster with a phone (skipping whoever texted it in).
   async function broadcastAnnouncement(ann, skipPhoneKey = '') {
     if (!smsOutboundReady()) return { sent: 0 };
-    const people = await q("SELECT id, name, phone FROM staff WHERE active = 1 AND phone <> ''");
+    const people = await q("SELECT id, name, phone FROM staff WHERE active = 1 AND phone <> '' AND notify_announcements");
     const biz = await db.getSetting('business_name', 'Daily Board');
     const from = named(ann.created_by);
     const text = `${biz}: ${from ? `announcement from ${from} — ` : ''}${ann.title ? ann.title + ' — ' : ''}${ann.body}`.slice(0, 600);
@@ -389,8 +392,8 @@ function mount(app, deps) {
   async function notifyTask(task, assignees, skipPhoneKey = '') {
     if (!smsOutboundReady() || await db.getSetting('sms_notify', '1') === '0') return { sent: 0 };
     const people = assignees.length
-      ? await q("SELECT id, name, phone FROM staff WHERE active = 1 AND phone <> '' AND id = ANY($1::int[])", [assignees])
-      : await q("SELECT id, name, phone FROM staff WHERE active = 1 AND phone <> '' AND NOT skip_everyone_tasks");   // "everyone" leaves out the exempt
+      ? await q("SELECT id, name, phone FROM staff WHERE active = 1 AND phone <> '' AND notify_tasks AND id = ANY($1::int[])", [assignees])
+      : await q("SELECT id, name, phone FROM staff WHERE active = 1 AND phone <> '' AND notify_tasks AND NOT skip_everyone_tasks");   // "everyone" leaves out the exempt
     const biz = await db.getSetting('business_name', 'Daily Board');
     const when = task.kind === 'daily' ? ' (every day)' : task.kind === 'weekly' ? ` (weekly${task.day_of_week != null ? ', due ' + DOW_SHORT[task.day_of_week] : ''})` : '';
     const from = named(task.created_by);
@@ -576,7 +579,7 @@ function mount(app, deps) {
     data.peer_eval = { enabled: ev.enabled, week: weekStart(data.today), criteria: ev.criteria,
       done: ev.enabled ? (await q('SELECT evaluator_id FROM peer_evals WHERE week = $1', [weekStart(data.today)])).map(r => r.evaluator_id) : [] };
     data.highlights = await q(`SELECT id, kind, author_name, subject_name, body, created_at FROM highlights
-      WHERE created_at > now() - interval '7 days' ORDER BY id DESC LIMIT 30`);
+      WHERE $1::int = 0 OR created_at > now() - make_interval(days => $1::int) ORDER BY id DESC LIMIT 30`, [await highlightDays()]);
     res.json(data);
   }));
 
@@ -766,7 +769,7 @@ function mount(app, deps) {
   app.get('/api/manager/overview', managerOnly, wrap(async (req, res) => {
     const todayStr = await today();
     const [staff, goal_templates, goals, goal_schedule, tasks, announcements, sms_log, completions, entries] = await Promise.all([
-      q('SELECT id, name, phone, role, active, created_at, sms_consent_at, pin, skip_announcements AS skip_ann, skip_everyone_tasks AS skip_tasks, skip_peer_evals AS skip_evals FROM staff ORDER BY active DESC, name'),
+      q('SELECT id, name, phone, role, active, created_at, sms_consent_at, pin, skip_announcements AS skip_ann, skip_everyone_tasks AS skip_tasks, skip_peer_evals AS skip_evals, notify_announcements AS n_ann, notify_tasks AS n_tasks, notify_highlights AS n_hl, notify_done AS n_done FROM staff ORDER BY active DESC, name'),
       q('SELECT * FROM goal_templates ORDER BY active DESC, sort, id'),
       q("SELECT * FROM goals WHERE date >= $1 OR (period = 'month' AND date >= $2) ORDER BY date, sort, id", [addDays(todayStr, -1), todayStr.slice(0, 7) + '-01']),
       q(`SELECT template_id, COUNT(*)::int AS days, MIN(date) AS from_date, MAX(date) AS to_date,
@@ -795,19 +798,21 @@ function mount(app, deps) {
     for (const p of staff) if (p.active && p.pin) pinCount[p.pin] = (pinCount[p.pin] || 0) + 1;
     const staffOut = staff.map(({ pin, ...p }) => ({ ...p, has_pin: !!pin, pin_shared: !!(p.active && pin && (pinCount[pin] > 1 || reserved.has(pin))) }));
     const pin_issues = { missing: staffOut.filter(p => p.active && !p.has_pin).length, shared: staffOut.filter(p => p.pin_shared).length };
+    const todayBoard = await boardData(todayStr);   // what's done / not done on today's board, for the Tasks tab
     const ev = await evalSettings();
     const peer_evals = (await q(`SELECT id, week, evaluator_id, evaluator_name, subject_id, subject_name, scores, strengths, improve, signature_kind, created_at
       FROM peer_evals WHERE week >= $1 ORDER BY week DESC, created_at DESC`, [addDays(weekStart(todayStr), -7 * 12)]))
       .map(e => { let sc = {}; try { sc = JSON.parse(e.scores); } catch {} return { ...e, scores: sc }; });
     res.json({
       today: todayStr, staff: staffOut, pin_issues, peer_evals, eval_settings: ev,
+      task_state: [...todayBoard.tasks_today, ...todayBoard.tasks_week].map(t => ({ id: t.id, done: !!t.done, by: t.completions.map(c => c.staff_name), needs: t.required ? t.required.length : 1 })),
       highlights: await q("SELECT id, kind, author_name, subject_name, body, created_at FROM highlights WHERE created_at > now() - interval '90 days' ORDER BY id DESC LIMIT 300"),
       goal_templates: goal_templates.map(t => ({ ...t, target: Number(t.target) })),
       goals: goals.map(g => ({ ...g, target: Number(g.target), baseline: g.baseline == null ? null : Number(g.baseline) })),
       goal_schedule, tasks, announcements: announcementsOut, sms_log, completions, goal_entries: entries,
       branding: await db.branding(),
       settings: {
-        timezone: s.timezone || '', announce_days: annDays, sheet_url: s.sheet_url || '', sheet_status: (() => { try { return s.sheet_status ? JSON.parse(s.sheet_status) : null; } catch { return null; } })(),
+        timezone: s.timezone || '', announce_days: annDays, highlight_days: await highlightDays(), sheet_url: s.sheet_url || '', sheet_status: (() => { try { return s.sheet_status ? JSON.parse(s.sheet_status) : null; } catch { return null; } })(),
         board_pass: s.board_pass || '', manager_pin: s.manager_pin || '', require_pin: s.require_pin === '1',
         sms_number: s.sms_number || '', sms_default_kind: s.sms_default_kind || 'announcement', sms_reply: s.sms_reply !== '0',
         sms_secured: !!(process.env.TWILIO_AUTH_TOKEN || process.env.SMS_WEBHOOK_SECRET),
@@ -857,12 +862,15 @@ function mount(app, deps) {
       if (!cur) return res.status(404).json({ error: 'Not found.' });
       const pin = b.pin == null ? cur.pin : String(b.pin).trim(); // undefined = keep, '' = clear
       const keep = (v, old) => (v == null ? !!old : flag(v));
-      await q('UPDATE staff SET name=$2, phone=$3, role=$4, pin=$5, active=$6, skip_announcements=$7, skip_everyone_tasks=$8, skip_peer_evals=$9 WHERE id=$1',
-        [cur.id, name, phone, role, pin, active, keep(b.skip_ann, cur.skip_announcements), keep(b.skip_tasks, cur.skip_everyone_tasks), keep(b.skip_evals, cur.skip_peer_evals)]);
+      const keepOn = (v, old) => (v == null ? old !== false : flag(v));   // notification choices default to on
+      await q('UPDATE staff SET name=$2, phone=$3, role=$4, pin=$5, active=$6, skip_announcements=$7, skip_everyone_tasks=$8, skip_peer_evals=$9, notify_announcements=$10, notify_tasks=$11, notify_highlights=$12, notify_done=$13 WHERE id=$1',
+        [cur.id, name, phone, role, pin, active, keep(b.skip_ann, cur.skip_announcements), keep(b.skip_tasks, cur.skip_everyone_tasks), keep(b.skip_evals, cur.skip_peer_evals),
+          keepOn(b.n_ann, cur.notify_announcements), keepOn(b.n_tasks, cur.notify_tasks), keepOn(b.n_hl, cur.notify_highlights), keepOn(b.n_done, cur.notify_done)]);
       return res.json({ ok: true, id: cur.id });
     }
-    const row = await one('INSERT INTO staff (name, phone, role, pin, active, skip_announcements, skip_everyone_tasks, skip_peer_evals) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id',
-      [name, phone, role, String(b.pin || '').trim(), active, flag(b.skip_ann), flag(b.skip_tasks), flag(b.skip_evals)]);
+    const row = await one('INSERT INTO staff (name, phone, role, pin, active, skip_announcements, skip_everyone_tasks, skip_peer_evals, notify_announcements, notify_tasks, notify_highlights, notify_done) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id',
+      [name, phone, role, String(b.pin || '').trim(), active, flag(b.skip_ann), flag(b.skip_tasks), flag(b.skip_evals),
+        b.n_ann == null ? true : flag(b.n_ann), b.n_tasks == null ? true : flag(b.n_tasks), b.n_hl == null ? true : flag(b.n_hl), b.n_done == null ? true : flag(b.n_done)]);
     res.json({ ok: true, id: row.id });
   }));
 
@@ -1098,6 +1106,7 @@ function mount(app, deps) {
       if (out[k] && out[k] !== (await db.getSetting(k, '')).trim() && await one('SELECT 1 AS x FROM staff WHERE pin = $1', [out[k]]))
         return res.status(400).json({ error: `That ${k === 'board_pass' ? 'board password' : 'manager PIN'} matches an employee's PIN — pick something different.` });
     if (b.require_pin != null) out.require_pin = isOff(b.require_pin) ? '0' : '1';
+    if (b.highlight_days != null) out.highlight_days = String(Math.max(0, Math.min(365, Math.round(num(b.highlight_days)))));
     if (b.announce_days != null) out.announce_days = String(Math.max(0, Math.min(365, Math.round(num(b.announce_days)))));
     if (b.sheet_url != null) {
       const link = clean(b.sheet_url, 1500);

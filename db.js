@@ -59,6 +59,11 @@ CREATE TABLE IF NOT EXISTS staff (
   active INTEGER NOT NULL DEFAULT 1,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Per-person notification choices (all on by default).
+ALTER TABLE staff ADD COLUMN IF NOT EXISTS notify_announcements BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE staff ADD COLUMN IF NOT EXISTS notify_tasks BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE staff ADD COLUMN IF NOT EXISTS notify_highlights BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE staff ADD COLUMN IF NOT EXISTS notify_done BOOLEAN NOT NULL DEFAULT true;   -- managers: "task completed" alerts
 -- Per-person exemptions (all off by default: everyone does everything).
 ALTER TABLE staff ADD COLUMN IF NOT EXISTS skip_announcements BOOLEAN NOT NULL DEFAULT false;   -- not tracked as reading announcements
 ALTER TABLE staff ADD COLUMN IF NOT EXISTS skip_everyone_tasks BOOLEAN NOT NULL DEFAULT false;  -- not required for tasks assigned to everyone
@@ -248,7 +253,7 @@ END $$;
 `;
 
 // Bump when DDL or defaults change; a mismatch replays the (idempotent) migration.
-const SCHEMA_VERSION = '12';
+const SCHEMA_VERSION = '13';
 
 async function ensureDefaults() {
   const setDefault = (k, v) => q('INSERT INTO settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO NOTHING', [k, v]);
