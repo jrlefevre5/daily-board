@@ -82,6 +82,10 @@ CREATE TABLE IF NOT EXISTS goals (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS goals_day_tpl_idx ON goals (date, template_id) WHERE template_id IS NOT NULL;
 ALTER TABLE goals ADD COLUMN IF NOT EXISTS baseline NUMERIC(12,2);   -- e.g. last year's number the target was built from
+-- Monthly goals: a goal's period is 'day' (one row per day) or 'month' (one row per month, dated the 1st;
+-- every entry logged that month adds to it).
+ALTER TABLE goal_templates ADD COLUMN IF NOT EXISTS period TEXT NOT NULL DEFAULT 'day';
+ALTER TABLE goals ADD COLUMN IF NOT EXISTS period TEXT NOT NULL DEFAULT 'day';
 -- Imported per-day targets for a recurring goal (e.g. last year's daily revenue
 -- + 5%). When a day is materialized, its row here overrides the template target.
 CREATE TABLE IF NOT EXISTS goal_schedule (
@@ -226,7 +230,7 @@ END $$;
 `;
 
 // Bump when DDL or defaults change; a mismatch replays the (idempotent) migration.
-const SCHEMA_VERSION = '8';
+const SCHEMA_VERSION = '9';
 
 async function ensureDefaults() {
   const setDefault = (k, v) => q('INSERT INTO settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO NOTHING', [k, v]);

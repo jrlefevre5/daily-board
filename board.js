@@ -359,6 +359,13 @@ function mount(app, deps) {
     if (date < todayStr) return;
     const sched = await q('SELECT template_id, target, baseline FROM goal_schedule WHERE date = $1', [date]);
     for (const t of await q('SELECT * FROM goal_templates WHERE active = 1 ORDER BY sort, id')) {
+      if (t.period === 'month') {
+        // One row for the whole month (dated the 1st); a daily row left over from before the switch is converted.
+        await q(`INSERT INTO goals (date, template_id, label, unit, target, sort, source, period) VALUES ($1,$2,$3,$4,$5,$6,'template','month')
+          ON CONFLICT (date, template_id) WHERE template_id IS NOT NULL DO UPDATE SET period = 'month', target = EXCLUDED.target WHERE goals.period <> 'month'`,
+          [date.slice(0, 7) + '-01', t.id, t.label, t.unit, t.target, t.sort]);
+        continue;
+      }
       const s = sched.find(x => x.template_id === t.id);
       await q(`INSERT INTO goals (date, template_id, label, unit, target, baseline, sort, source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
         ON CONFLICT (date, template_id) WHERE template_id IS NOT NULL DO NOTHING`,
@@ -372,9 +379,10 @@ function mount(app, deps) {
     await materializeGoals(date, todayStr);
     const annDays = await announceDays();
     const [goals, entries, staff, tasks, completions, anns, acks, settings] = await Promise.all([
-      q('SELECT * FROM goals WHERE date = $1 ORDER BY sort, id', [date]),
+      // This day's daily goals, plus the monthly goals for the month it falls in.
+      q("SELECT * FROM goals WHERE (period = 'day' AND date = $1) OR (period = 'month' AND date = $2) ORDER BY sort, id", [date, date.slice(0, 7) + '-01']),
       q(`SELECT e.goal_id, e.amount, e.staff_name, e.note, e.created_at FROM goal_entries e
-         JOIN goals g ON g.id = e.goal_id WHERE g.date = $1 ORDER BY e.id`, [date]),
+         JOIN goals g ON g.id = e.goal_id WHERE (g.period = 'day' AND g.date = $1) OR (g.period = 'month' AND g.date = $2) ORDER BY e.id`, [date, date.slice(0, 7) + '-01']),
       q('SELECT id, name, role, pin FROM staff WHERE active = 1 ORDER BY name'),
       q(`SELECT * FROM tasks WHERE active = 1 AND (kind = 'daily' OR (kind = 'once' AND due_date = $1) OR kind = 'weekly')
          ORDER BY sort, id`, [date]),
@@ -417,7 +425,9 @@ function mount(app, deps) {
       require_pin: settings.require_pin === '1',   // true: signing needs the employee's own PIN (no name picker)
       staff: staff.map(s => ({ id: s.id, name: s.name, role: s.role, has_pin: !!s.pin })),
       goals: goals.map(g => ({ id: g.id, label: g.label, unit: g.unit, target: Number(g.target), baseline: g.baseline == null ? null : Number(g.baseline),
-        actual: (byGoal[g.id] || []).reduce((s, e) => s + e.amount, 0), entries: byGoal[g.id] || [] })),
+        period: g.period, month: g.period === 'month' ? g.date.slice(0, 7) : null,
+        actual: (byGoal[g.id] || []).reduce((s, e) => s + e.amount, 0),
+        entries: g.period === 'month' ? (byGoal[g.id] || []).slice(-5) : byGoal[g.id] || [] })),   // a month can hold hundreds of entries; the board only needs the latest
       tasks_today, tasks_week,
       announcements: anns.map(a => ({ id: a.id, title: a.title, body: a.body, media_url: a.media_url, pinned: !!a.pinned,
         expires_on: a.expires_on, source: a.source, created_by: a.created_by, created_at: a.created_at, acks: ackBy[a.id] || [] })),
@@ -663,7 +673,7 @@ function mount(app, deps) {
     const [staff, goal_templates, goals, goal_schedule, tasks, announcements, sms_log, completions, entries] = await Promise.all([
       q('SELECT id, name, phone, role, active, created_at, sms_consent_at, pin FROM staff ORDER BY active DESC, name'),
       q('SELECT * FROM goal_templates ORDER BY active DESC, sort, id'),
-      q('SELECT * FROM goals WHERE date >= $1 ORDER BY date, sort, id', [addDays(todayStr, -1)]),
+      q("SELECT * FROM goals WHERE date >= $1 OR (period = 'month' AND date >= $2) ORDER BY date, sort, id", [addDays(todayStr, -1), todayStr.slice(0, 7) + '-01']),
       q(`SELECT template_id, COUNT(*)::int AS days, MIN(date) AS from_date, MAX(date) AS to_date,
            COUNT(*) FILTER (WHERE date >= $1)::int AS days_ahead FROM goal_schedule GROUP BY template_id`, [todayStr]),
       q(`SELECT * FROM tasks WHERE active = 1 OR created_at > now() - interval '30 days' ORDER BY active DESC, kind, sort, id`),
@@ -762,16 +772,21 @@ function mount(app, deps) {
     const label = clean(b.label, 80);
     if (!label) return res.status(400).json({ error: 'Goal name is required.' });
     const unit = b.unit === 'dollars' ? 'dollars' : 'count';
+    const period = b.period === 'month' ? 'month' : 'day';
     const target = Math.max(0, num(b.target)), sort = num(b.sort), active = isOff(b.active) ? 0 : 1;
     let id = Number(b.id) || 0;
-    if (id) await q('UPDATE goal_templates SET label=$2, unit=$3, target=$4, sort=$5, active=$6 WHERE id=$1', [id, label, unit, target, sort, active]);
-    else id = (await one('INSERT INTO goal_templates (label, unit, target, sort, active) VALUES ($1,$2,$3,$4,$5) RETURNING id', [label, unit, target, sort, active])).id;
-    // Today's copy follows the template right away (past days keep their history).
-    const todayStr = await today();
-    if (active) await q(`INSERT INTO goals (date, template_id, label, unit, target, sort, source) VALUES ($1,$2,$3,$4,$5,$6,'template')
-      ON CONFLICT (date, template_id) WHERE template_id IS NOT NULL DO UPDATE SET label = EXCLUDED.label, unit = EXCLUDED.unit, target = EXCLUDED.target, sort = EXCLUDED.sort`,
-      [todayStr, id, label, unit, target, sort]);
-    else await q('DELETE FROM goals WHERE template_id = $1 AND date >= $2 AND NOT EXISTS (SELECT 1 FROM goal_entries e WHERE e.goal_id = goals.id)', [id, todayStr]);
+    if (id) await q('UPDATE goal_templates SET label=$2, unit=$3, target=$4, sort=$5, active=$6, period=$7 WHERE id=$1', [id, label, unit, target, sort, active, period]);
+    else id = (await one('INSERT INTO goal_templates (label, unit, target, sort, active, period) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id', [label, unit, target, sort, active, period])).id;
+    // Today's (or this month's) copy follows the template right away (past days and months keep their history).
+    const todayStr = await today(), monthStart = todayStr.slice(0, 7) + '-01';
+    const noEntries = 'NOT EXISTS (SELECT 1 FROM goal_entries e WHERE e.goal_id = goals.id)';
+    if (active) {
+      // Switching between daily and monthly: drop the other kind's empty copies from today / this month onward.
+      await q(`DELETE FROM goals WHERE template_id = $1 AND period <> $2 AND date >= $3 AND ${noEntries}`, [id, period, period === 'month' ? todayStr : monthStart]);
+      await q(`INSERT INTO goals (date, template_id, label, unit, target, sort, source, period) VALUES ($1,$2,$3,$4,$5,$6,'template',$7)
+        ON CONFLICT (date, template_id) WHERE template_id IS NOT NULL DO UPDATE SET label = EXCLUDED.label, unit = EXCLUDED.unit, target = EXCLUDED.target, sort = EXCLUDED.sort, period = EXCLUDED.period`,
+        [period === 'month' ? monthStart : todayStr, id, label, unit, target, sort, period]);
+    } else await q(`DELETE FROM goals WHERE template_id = $1 AND (date >= $2 OR (period = 'month' AND date >= $3)) AND ${noEntries}`, [id, todayStr, monthStart]);
     res.json({ ok: true, id });
   }));
 
@@ -782,6 +797,7 @@ function mount(app, deps) {
     const b = req.body || {};
     const tpl = Number.isInteger(Number(b.template_id)) && Number(b.template_id) > 0 ? await one('SELECT * FROM goal_templates WHERE id = $1', [Number(b.template_id)]) : null;
     if (!tpl) return res.status(400).json({ error: 'Pick which goal this schedule is for.' });
+    if (tpl.period === 'month') return res.status(400).json({ error: 'Imported targets are per day, so they only apply to daily goals.' });
     const todayStr = await today();
     if (b.clear) {
       await q('DELETE FROM goal_schedule WHERE template_id = $1', [tpl.id]);
@@ -1075,12 +1091,13 @@ function mount(app, deps) {
         if (sent) msg += ` Texted ${sent} ${sent === 1 ? 'person' : 'people'}.`;
       }
     } else if (cmd.action === 'goal') {
-      // Replace today's goal with that name if there is one, otherwise add it.
-      const existing = (await q('SELECT * FROM goals WHERE date = $1', [todayStr])).find(g => g.label.toLowerCase() === cmd.label.toLowerCase());
+      // Replace today's goal (or this month's monthly goal) with that name if there is one, otherwise add a goal for today.
+      const existing = (await q("SELECT * FROM goals WHERE (period = 'day' AND date = $1) OR (period = 'month' AND date = $2)", [todayStr, todayStr.slice(0, 7) + '-01']))
+        .find(g => g.label.toLowerCase() === cmd.label.toLowerCase());
       if (existing) { await q('UPDATE goals SET target = $2, unit = $3 WHERE id = $1', [existing.id, cmd.target, cmd.unit]); targetId = existing.id; }
       else targetId = (await one(`INSERT INTO goals (date, label, unit, target, sort, source) VALUES ($1,$2,$3,$4,99,'sms') RETURNING id`,
         [todayStr, cmd.label, cmd.unit, cmd.target])).id;
-      msg = `Today's goal set: ${cmd.label} → ${cmd.unit === 'dollars' ? '$' + cmd.target.toLocaleString('en-US') : cmd.target} ✓`;
+      msg = `${existing && existing.period === 'month' ? "This month's" : "Today's"} goal set: ${cmd.label} → ${cmd.unit === 'dollars' ? '$' + cmd.target.toLocaleString('en-US') : cmd.target} ✓`;
     }
     await log({ staff_name: sender.name, action, target_id: targetId, reply: msg });
     reply(msg);

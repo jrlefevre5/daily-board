@@ -31,6 +31,11 @@ It refreshes itself every minute and whenever the app comes back to the
 foreground; the ↻ button in the top bar (or pulling down from the top of the
 page) refreshes on demand.
 
+- **Monthly goals** — a recurring goal can repeat **every month** instead of every
+  day (e.g. *Units sold 300 a month*, *Revenue $60,000 a month*; set Repeats = every
+  month under Manager panel → Goals). Everything logged that month adds up, the card
+  shows how it's pacing ("112 to go · 14 days left · about 8 a day · on pace"), and a
+  new month starts again from zero. Past months keep their totals.
 - **Sales goals** — recurring goals (e.g. *Units sold 25*, *Revenue $1,200*)
   copy onto every new day. Employees tap **+ Log**, pick their name, sign, and
   the goal ticks up. Each entry is recorded with who/when/note.
