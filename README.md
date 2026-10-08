@@ -144,6 +144,19 @@ the board is **Settings → Shift highlights & shoutouts** (default 7 days, 0 =
 no limit). The manager **Tasks** tab lists today's tasks as *Not completed* and
 *Completed*, with everything else (other days, switched off) below.
 
+## Reminders
+
+Under **Settings → Task reminder**: a time (store time) for a daily push about
+tasks still open on today's board, and optionally a day of the week for a weekly
+push (open weekly tasks plus a nudge to give a shoutout). People who still owe a
+named or "everyone" task hear about theirs, "anyone" tasks go to every device,
+managers get the full list, and the notification choices and exemptions above
+are respected. Each goes out at most once a day / once a week, and not before the
+time set. `vercel.json` has a daily timer (21:00 UTC, about 3 PM Mountain) that
+calls `/api/cron/reminders`; for other times, point any outside timer (for
+example cron-job.org, every 15 minutes) at that same address — it only sends
+when the time is right. **Send a daily / weekly reminder now** tests it.
+
 ## Exemptions
 
 Everyone has to do everything by default. On **Staff → Edit** you can switch on,

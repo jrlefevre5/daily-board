@@ -26,6 +26,9 @@ function addDays(dateStr, n) {
 // The board's week runs Monday–Sunday; weekly tasks are signed once per week.
 function weekStart(dateStr) { return addDays(dateStr, -((dowOf(dateStr) + 6) % 7)); }
 function validTz(tz) { try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return true; } catch { return false; } }
+function localHM(tz) {   // the business's clock as "HH:MM"
+  return new Intl.DateTimeFormat('en-GB', { timeZone: validTz(tz) ? tz : 'UTC', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date());
+}
 function localToday(tz) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: validTz(tz) ? tz : 'UTC' }).format(new Date());
 }
@@ -349,6 +352,102 @@ function mount(app, deps) {
       return await sendPush(subs, { title: shout ? `Shoutout: ${h.author_name} → ${h.subject_name}` : `Shift highlight from ${h.author_name}`, body: String(h.body).slice(0, 160), tag: 'hl-' + h.id, url: '/' });
     } catch (e) { console.warn('push error:', e && e.message); return { sent: 0 }; }
   }
+  // Daily reminder for tasks still open on today's board. People who owe a named / "everyone" task hear about their
+  // own; "anyone" tasks go to every device; managers get the full list. Sent at most once a day, and never before the
+  // time set in Settings, so it is safe for a cron (vercel.json) or any outside timer to call it as often as it likes.
+  async function sendTaskReminders(force) {
+    const time = String(await db.getSetting('reminder_time', '')).trim();
+    const tz = await db.getSetting('timezone', 'UTC');
+    const todayStr = localToday(tz);
+    if (!force) {
+      if (!/^\d{2}:\d{2}$/.test(time)) return { skipped: 'off' };
+      if (localHM(tz) < time) return { skipped: 'too early' };
+      const claimed = await one(`INSERT INTO settings (key, value) VALUES ('reminder_last', $1)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value WHERE settings.value <> EXCLUDED.value RETURNING key`, [todayStr]);
+      if (!claimed) return { skipped: 'already sent today' };
+      db.clearSettingsCache();
+    }
+    const bd = await boardData(todayStr);
+    const open = bd.tasks_today.filter(t => !t.done);
+    if (!open.length) return { open: 0, sent: 0 };
+    const shared = [], personal = {};
+    for (const t of open) {
+      if (t.assign === 'each') {
+        const signed = t.completions.map(c => c.staff_id);
+        for (const id of (t.required || []).filter(x => !signed.includes(x))) (personal[id] = personal[id] || []).push(t.title);
+      } else shared.push(t.title);
+    }
+    const subs = await q(`SELECT p.*, s.role AS s_role, COALESCE(s.skip_everyone_tasks, false) AS s_skip, COALESCE(s.notify_tasks, true) AS s_notify
+      FROM push_subscriptions p LEFT JOIN staff s ON s.id = p.staff_id`);
+    const groups = new Map();
+    for (const s of subs) {
+      if (!s.s_notify) continue;
+      const isMgr = s.is_manager || s.s_role === 'manager';
+      const titles = [...new Set(isMgr ? open.map(t => t.title) : [...(s.s_skip ? [] : shared), ...(personal[s.staff_id] || [])])];
+      if (!titles.length) continue;
+      const key = titles.join('\u0001');
+      if (!groups.has(key)) groups.set(key, { titles, subs: [] });
+      groups.get(key).subs.push(s);
+    }
+    const biz = await db.getSetting('business_name', 'Daily Board');
+    let sent = 0;
+    for (const g of groups.values()) {
+      const n = g.titles.length;
+      const r = await sendPush(g.subs, { title: `${biz}: ${n} task${n === 1 ? '' : 's'} still open today`, body: g.titles.join(', ').slice(0, 160), tag: 'remind-' + todayStr, url: '/' });
+      sent += r.sent;
+    }
+    return { open: open.length, sent };
+  }
+  // Weekly nudge on the chosen day (at the same time as the daily reminder, 3 PM if none is set): weekly tasks still
+  // open this week, plus a prompt to give a teammate a shoutout.
+  async function sendWeeklyReminders(force) {
+    const day = String(await db.getSetting('weekly_reminder_day', '')).trim();
+    const tz = await db.getSetting('timezone', 'UTC');
+    const todayStr = localToday(tz);
+    if (!force) {
+      if (!/^[0-6]$/.test(day)) return { skipped: 'off' };
+      if (new Date(todayStr + 'T00:00:00Z').getUTCDay() !== Number(day)) return { skipped: 'not today' };
+      const time = String(await db.getSetting('reminder_time', '')).trim();
+      if (localHM(tz) < (/^\d{2}:\d{2}$/.test(time) ? time : '15:00')) return { skipped: 'too early' };
+      const claimed = await one(`INSERT INTO settings (key, value) VALUES ('weekly_reminder_last', $1)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value WHERE settings.value <> EXCLUDED.value RETURNING key`, [todayStr]);
+      if (!claimed) return { skipped: 'already sent today' };
+      db.clearSettingsCache();
+    }
+    const bd = await boardData(todayStr);
+    const open = bd.tasks_week.filter(t => !t.done);
+    const shared = [], personal = {};
+    for (const t of open) {
+      if (t.assign === 'each') {
+        const signed = t.completions.map(c => c.staff_id);
+        for (const id of (t.required || []).filter(x => !signed.includes(x))) (personal[id] = personal[id] || []).push(t.title);
+      } else shared.push(t.title);
+    }
+    const subs = await q(`SELECT p.*, s.role AS s_role, COALESCE(s.skip_everyone_tasks, false) AS s_skip, COALESCE(s.notify_tasks, true) AS s_tasks, COALESCE(s.notify_highlights, true) AS s_hl
+      FROM push_subscriptions p LEFT JOIN staff s ON s.id = p.staff_id`);
+    const groups = new Map();
+    for (const s of subs) {
+      const isMgr = s.is_manager || s.s_role === 'manager';
+      const titles = s.s_tasks ? [...new Set(isMgr ? open.map(t => t.title) : [...(s.s_skip ? [] : shared), ...(personal[s.staff_id] || [])])] : [];
+      if (!titles.length && !s.s_hl) continue;
+      const key = titles.join('\u0001') + '|' + (s.s_hl ? 1 : 0);
+      if (!groups.has(key)) groups.set(key, { titles, hl: !!s.s_hl, subs: [] });
+      groups.get(key).subs.push(s);
+    }
+    const biz = await db.getSetting('business_name', 'Daily Board');
+    let sent = 0;
+    for (const g of groups.values()) {
+      const n = g.titles.length;
+      const body = [n ? `Still open this week: ${g.titles.join(', ')}.` : '', g.hl ? 'Give a teammate a shoutout before the week ends!' : ''].filter(Boolean).join(' ');
+      const r = await sendPush(g.subs, { title: n ? `${biz}: ${n} weekly task${n === 1 ? '' : 's'} still open` : `${biz}: weekly check-in`, body: body.slice(0, 160), tag: 'weekly-' + todayStr, url: '/' });
+      sent += r.sent;
+    }
+    return { open: open.length, sent };
+  }
+  app.get('/api/cron/reminders', wrap(async (req, res) => { res.json({ daily: await sendTaskReminders(false), weekly: await sendWeeklyReminders(false) }); }));
+  app.post('/api/manager/send-reminders', managerOnly, wrap(async (req, res) => {
+    res.json({ ok: true, ...(await ((req.body || {}).weekly ? sendWeeklyReminders(true) : sendTaskReminders(true))) });
+  }));
   // Only real push services may be subscribed (the server will POST to this address).
   const pushHostOk = u => { try { const h = new URL(u); return h.protocol === 'https:' && /(^|\.)(googleapis\.com|push\.apple\.com|mozilla\.com|windows\.com)$/.test(h.hostname); } catch { return false; } };
   app.get('/api/push/key', boardAuth, wrap(async (req, res) => {
@@ -812,7 +911,7 @@ function mount(app, deps) {
       goal_schedule, tasks, announcements: announcementsOut, sms_log, completions, goal_entries: entries,
       branding: await db.branding(),
       settings: {
-        timezone: s.timezone || '', announce_days: annDays, highlight_days: await highlightDays(), sheet_url: s.sheet_url || '', sheet_status: (() => { try { return s.sheet_status ? JSON.parse(s.sheet_status) : null; } catch { return null; } })(),
+        timezone: s.timezone || '', reminder_time: s.reminder_time || '', weekly_reminder_day: s.weekly_reminder_day || '', announce_days: annDays, highlight_days: await highlightDays(), sheet_url: s.sheet_url || '', sheet_status: (() => { try { return s.sheet_status ? JSON.parse(s.sheet_status) : null; } catch { return null; } })(),
         board_pass: s.board_pass || '', manager_pin: s.manager_pin || '', require_pin: s.require_pin === '1',
         sms_number: s.sms_number || '', sms_default_kind: s.sms_default_kind || 'announcement', sms_reply: s.sms_reply !== '0',
         sms_secured: !!(process.env.TWILIO_AUTH_TOKEN || process.env.SMS_WEBHOOK_SECRET),
@@ -1106,6 +1205,16 @@ function mount(app, deps) {
       if (out[k] && out[k] !== (await db.getSetting(k, '')).trim() && await one('SELECT 1 AS x FROM staff WHERE pin = $1', [out[k]]))
         return res.status(400).json({ error: `That ${k === 'board_pass' ? 'board password' : 'manager PIN'} matches an employee's PIN — pick something different.` });
     if (b.require_pin != null) out.require_pin = isOff(b.require_pin) ? '0' : '1';
+    if (b.reminder_time != null) {
+      const rt = String(b.reminder_time).trim();
+      if (rt && !/^([01]\d|2[0-3]):[0-5]\d$/.test(rt)) return res.status(400).json({ error: 'Reminder time should look like 15:00.' });
+      out.reminder_time = rt;
+    }
+    if (b.weekly_reminder_day != null) {
+      const wd = String(b.weekly_reminder_day).trim();
+      if (wd && !/^[0-6]$/.test(wd)) return res.status(400).json({ error: 'Pick a day of the week for the weekly reminder.' });
+      out.weekly_reminder_day = wd;
+    }
     if (b.highlight_days != null) out.highlight_days = String(Math.max(0, Math.min(365, Math.round(num(b.highlight_days)))));
     if (b.announce_days != null) out.announce_days = String(Math.max(0, Math.min(365, Math.round(num(b.announce_days)))));
     if (b.sheet_url != null) {
