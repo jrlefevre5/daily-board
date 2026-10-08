@@ -70,7 +70,7 @@ page) refreshes on demand.
   outbound texting configured, an announcement can be texted to the whole
   roster (per post, or every post via Settings → *Text announcements to
   everyone*); a texted-in announcement goes to everyone but its sender.
-- **Peer evaluations** — once a week each person rates one teammate (1–5 on a
+- **Peer evaluations** (retired — the board now has shoutouts and highlights, below; the old ratings stay under *Past evaluations*) — once a week each person rates one teammate (1–5 on a
   manager-set list of criteria, plus "doing well" and "one thing to work on")
   and signs. They pick whom, excluding themselves and anyone they rated within
   the last *N* weeks, so it rotates. The board shows only who has submitted;
@@ -120,14 +120,25 @@ PIN to sign**:
 - The setting is off by default so nobody is locked out before everyone has a PIN.
   PINs are stored as entered and never sent back to the browser.
 
+## Shift highlights and peer shoutouts
+
+Anyone can post to the board's **Shift highlights & shoutouts** panel, any time:
+a **shift highlight** is something good that happened on their shift; a
+**shoutout** is praise for a named teammate. Posting uses the person's PIN (or
+name pick), no signature. Every device with notifications on gets a push ("Shift
+highlight from Sam" / "Shoutout: Sam → Alex"), the board shows the last 7 days,
+and managers see the last 90 days under **Manager panel → Highlights**, where
+anything can be removed. Neither is required, so there is nothing to track and
+no exemption. This replaces the weekly peer evaluations on the board; the old
+ratings are kept under **Past evaluations**.
+
 ## Exemptions
 
 Everyone has to do everything by default. On **Staff → Edit** you can switch on,
 per person and separately: **exempt from marking announcements read** (not
 auto-tracked, and left off the manager's "Not read yet" list), **exempt from tasks
 assigned to everyone** (not required, not texted or pushed for them — a task
-given to them by name still counts), and **exempt from peer evaluations** (not
-asked to do one and blocked from submitting; teammates can still rate them).
+given to them by name still counts). Shoutouts and highlights are optional, so they have no exemption.
 
 ## App notifications
 

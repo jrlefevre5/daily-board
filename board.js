@@ -338,6 +338,14 @@ function mount(app, deps) {
       return await sendPush(subs, { title: `${biz}: task completed`, body: `✓ ${who.staff_name} completed: ${task.title}${progress}`.slice(0, 160), tag: 'done-' + completionId, url: '/' });
     } catch (e) { console.warn('push error:', e && e.message); return { sent: 0 }; }
   }
+  // A new highlight / shoutout goes to every device with notifications on (except the author's own).
+  async function pushHighlight(h, skipStaffId = 0) {
+    try {
+      const subs = await q('SELECT * FROM push_subscriptions WHERE staff_id IS NULL OR staff_id <> $1', [skipStaffId]);
+      const shout = h.kind === 'shoutout';
+      return await sendPush(subs, { title: shout ? `Shoutout: ${h.author_name} → ${h.subject_name}` : `Shift highlight from ${h.author_name}`, body: String(h.body).slice(0, 160), tag: 'hl-' + h.id, url: '/' });
+    } catch (e) { console.warn('push error:', e && e.message); return { sent: 0 }; }
+  }
   // Only real push services may be subscribed (the server will POST to this address).
   const pushHostOk = u => { try { const h = new URL(u); return h.protocol === 'https:' && /(^|\.)(googleapis\.com|push\.apple\.com|mozilla\.com|windows\.com)$/.test(h.hostname); } catch { return false; } };
   app.get('/api/push/key', boardAuth, wrap(async (req, res) => {
@@ -567,7 +575,30 @@ function mount(app, deps) {
     const ev = await evalSettings();
     data.peer_eval = { enabled: ev.enabled, week: weekStart(data.today), criteria: ev.criteria,
       done: ev.enabled ? (await q('SELECT evaluator_id FROM peer_evals WHERE week = $1', [weekStart(data.today)])).map(r => r.evaluator_id) : [] };
+    data.highlights = await q(`SELECT id, kind, author_name, subject_name, body, created_at FROM highlights
+      WHERE created_at > now() - interval '7 days' ORDER BY id DESC LIMIT 30`);
     res.json(data);
+  }));
+
+  // Shift highlights (something good on a shift) and peer shoutouts (praise for a teammate). Open to everyone,
+  // any time; the author is who the PIN (or name pick) says, and everyone with notifications on hears about it.
+  app.post('/api/board/highlight', boardAuth, wrap(async (req, res) => {
+    const b = req.body || {};
+    const who = await resolveSigner(b, req);
+    if (typeof who === 'string') { if (b.staff_id && b.pin) recordFail(req); return res.status(400).json({ error: who }); }
+    const kind = b.kind === 'shoutout' ? 'shoutout' : 'highlight';
+    const body = clean(b.body, 500);
+    if (!body) return res.status(400).json({ error: kind === 'shoutout' ? 'Write what they did.' : 'Write what went well.' });
+    let subject = null;
+    if (kind === 'shoutout') {
+      subject = await one('SELECT id, name FROM staff WHERE id = $1 AND active = 1', [Number(b.subject_id)]);
+      if (!subject) return res.status(400).json({ error: 'Pick a teammate to give a shoutout to.' });
+      if (subject.id === who.staff_id) return res.status(400).json({ error: "You can't give yourself a shoutout." });
+    }
+    const row = await one(`INSERT INTO highlights (kind, author_id, author_name, subject_id, subject_name, body)
+      VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`, [kind, who.staff_id, who.staff_name, subject ? subject.id : null, subject ? subject.name : '', body]);
+    await pushHighlight({ id: row.id, kind, author_name: who.staff_name, subject_name: subject ? subject.name : '', body }, who.staff_id || 0);
+    res.json({ ok: true, id: row.id });
   }));
 
   // Who is signing. With "Require employee PIN" on, the PIN alone picks the person (the board
@@ -770,6 +801,7 @@ function mount(app, deps) {
       .map(e => { let sc = {}; try { sc = JSON.parse(e.scores); } catch {} return { ...e, scores: sc }; });
     res.json({
       today: todayStr, staff: staffOut, pin_issues, peer_evals, eval_settings: ev,
+      highlights: await q("SELECT id, kind, author_name, subject_name, body, created_at FROM highlights WHERE created_at > now() - interval '90 days' ORDER BY id DESC LIMIT 300"),
       goal_templates: goal_templates.map(t => ({ ...t, target: Number(t.target) })),
       goals: goals.map(g => ({ ...g, target: Number(g.target), baseline: g.baseline == null ? null : Number(g.baseline) })),
       goal_schedule, tasks, announcements: announcementsOut, sms_log, completions, goal_entries: entries,
@@ -1005,6 +1037,7 @@ function mount(app, deps) {
     if (b.completion_id) await q('DELETE FROM task_completions WHERE id = $1', [Number(b.completion_id)]);
     if (b.entry_id) await q('DELETE FROM goal_entries WHERE id = $1', [Number(b.entry_id)]);
     if (b.eval_id) await q('DELETE FROM peer_evals WHERE id = $1', [Number(b.eval_id)]);
+    if (b.highlight_id) await q('DELETE FROM highlights WHERE id = $1', [Number(b.highlight_id)]);
     if (b.ack_id) await q('DELETE FROM announcement_acks WHERE id = $1', [Number(b.ack_id)]);
     res.json({ ok: true });
   }));
