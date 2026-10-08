@@ -325,12 +325,52 @@ function render() {
         ${weekList.length ? weekList.map(taskRow(canSign)).join('') : `<div class="empty">${data.tasks_week.length ? 'All done for this week ✓' : 'No weekly tasks yet.'}</div>`}
       </div>
     </div>
-    ${evalPanel(canSign && isToday)}
+    ${highlightsPanel(canSign)}
     ${data.sms_number ? `<p class="mini" style="text-align:center">Managers: text <b>${esc(data.sms_number)}</b> to post — start with ANNOUNCE, TASK, DAILY, WEEKLY, or GOAL (or HELP).</p>` : ''}`;
   watchAnnouncements();
 }
 
-// ---------- peer evaluations ----------
+// ---------- shift highlights & peer shoutouts ----------
+function highlightsPanel(canDo) {
+  const list = data.highlights || [];
+  const item = h => `<div class="hl"><span class="hl-ic">${h.kind === 'shoutout' ? '👏' : '⭐'}</span><div><div>${h.kind === 'shoutout' ? `<b>${esc(h.author_name)}</b> gave <b>${esc(h.subject_name)}</b> a shoutout: ` : ''}${esc(h.body)}</div>
+    <div class="mini">${h.kind === 'shoutout' ? '' : `Shift highlight from <b>${esc(h.author_name)}</b> · `}${esc(fmtStamp(h.created_at))}</div></div></div>`;
+  return `<div class="panel">
+    <h2>Shift highlights &amp; shoutouts <span class="count">${list.length || ''}</span></h2>
+    ${canDo ? `<div style="margin:0 0 10px"><button class="small" onclick="openHL('highlight')">⭐ Share a shift highlight</button> <button class="small ghost" onclick="openHL('shoutout')">👏 Give a teammate a shoutout</button></div>` : ''}
+    ${list.length ? list.map(item).join('') : `<div class="empty">Nothing shared this week yet — tell the team about something good that happened on your shift.</div>`}
+  </div>`;
+}
+window.openHL = kind => {
+  const shout = kind === 'shoutout';
+  $modal.innerHTML = `<div class="modal-back" onclick="if(event.target===this)closeModal()"><div class="modal">
+    <h3>${shout ? '👏 Give a shoutout' : '⭐ Share a shift highlight'}</h3>
+    <p class="sub">${shout ? 'Recognize a teammate for something they did. Everyone with notifications on will see it.' : 'Something good that happened on your shift. Everyone with notifications on will see it.'}</p>
+    <form onsubmit="submitHL('${kind}'); return false">
+      ${staffPicker('hl')}
+      ${shout ? `<label>Who's the shoutout for?</label><select class="inline" id="hl_subject"><option value="">Choose a teammate…</option>${data.staff.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>` : ''}
+      <label>${shout ? 'What did they do?' : 'What went well?'}</label>
+      <textarea class="inline" id="hl_body" maxlength="500" placeholder="${shout ? 'Be specific — what did they do that you appreciated?' : 'A great sale, a happy customer, a problem solved…'}"></textarea>
+      <div class="err" id="hl_err"></div>
+      <div class="row"><button type="button" class="small ghost" onclick="closeModal()">Cancel</button><button type="submit" class="small green" id="hl_go">Post</button></div>
+    </form>
+  </div></div>`;
+  onStaffPick('hl');
+};
+window.submitHL = async kind => {
+  const err = document.getElementById('hl_err'), go = document.getElementById('hl_go');
+  const body = { ...signerFields('hl'), kind, body: document.getElementById('hl_body').value.trim() };
+  if (kind === 'shoutout') { body.subject_id = Number((document.getElementById('hl_subject') || {}).value) || 0; if (!body.subject_id) { err.textContent = 'Choose a teammate.'; return; } }
+  if (!body.body) { err.textContent = 'Write a few words first.'; return; }
+  go.disabled = true; err.textContent = '';
+  const out = await api('/api/board/highlight', body);
+  go.disabled = false;
+  if (out.error) { err.textContent = out.error; return; }
+  if (body.staff_id) { lastStaff = body.staff_id; localStorage.setItem('db_me', String(lastStaff)); }
+  closeModal(); await loadBoard();
+};
+
+// ---------- peer evaluations (the old weekly ratings; no longer shown on the board) ----------
 function evalPanel(canDo) {
   const pe = data.peer_eval;
   const raters = data.staff.filter(s => !s.skip_evals);   // people exempted from evaluations aren't expected to do one
@@ -800,7 +840,7 @@ async function reloadMgr() {
 }
 
 function renderManager() {
-  const tabs = [['goals', 'Goals'], ['tasks', 'Tasks'], ['announcements', 'Announcements'], ['staff', 'Staff'], ['sms', 'Text-in'], ['activity', 'Activity'], ['evals', 'Evaluations'], ['branding', 'Branding'], ['settings', 'Settings']];
+  const tabs = [['goals', 'Goals'], ['tasks', 'Tasks'], ['announcements', 'Announcements'], ['staff', 'Staff'], ['sms', 'Text-in'], ['activity', 'Activity'], ['highlights', 'Highlights'], ['evals', 'Past evaluations'], ['branding', 'Branding'], ['settings', 'Settings']];
   document.getElementById('topRight').textContent = 'Manager panel'; syncRefreshBtn();
   $app.innerHTML = `
     <div class="bar">
@@ -811,7 +851,7 @@ function renderManager() {
       <button class="mini-btn" onclick="managerLogout()">Sign out</button>
     </div>
     <div class="tabs">${tabs.map(([k, l]) => `<button class="${mgrTab === k ? 'on' : ''}" onclick="mgrTabTo('${k}')">${l}</button>`).join('')}</div>
-    <div class="panel">${({ goals: mgrGoals, tasks: mgrTasks, announcements: mgrAnns, staff: mgrStaff, sms: mgrSms, activity: mgrActivity, evals: mgrEvals, branding: mgrBranding, settings: mgrSettings })[mgrTab]()}</div>`;
+    <div class="panel">${({ goals: mgrGoals, tasks: mgrTasks, announcements: mgrAnns, staff: mgrStaff, sms: mgrSms, activity: mgrActivity, highlights: mgrHighlights, evals: mgrEvals, branding: mgrBranding, settings: mgrSettings })[mgrTab]()}</div>`;
   if (mgrTab === 'branding') brandPreview();
 }
 
@@ -1033,7 +1073,7 @@ function mgrStaff() {
     <div class="tools"><div class="spacer"></div><button class="small" onclick="editStaff()">+ Add person</button></div>
     <p class="mini" style="margin:-6px 0 12px">Text opt-in page for staff (also what Twilio asks for as the opt-in policy): <code class="url">${esc(location.origin + '/sms.html')}</code></p>
     <table class="list"><tr><th>Name</th><th>Role</th><th>Phone</th><th>Texts</th><th>PIN</th><th></th></tr>
-      ${mgr.staff.map(s => `<tr class="${s.active ? '' : 'off'}"><td>${esc(s.name)} ${onoff(s.active)}${s.skip_ann ? ' <span class="chip" title="Not tracked reading announcements">no reads</span>' : ''}${s.skip_tasks ? ' <span class="chip" title="Not part of tasks for everyone">no team tasks</span>' : ''}${s.skip_evals ? ' <span class="chip" title="Does not do peer evaluations">no evals</span>' : ''}</td><td>${s.role}</td><td>${esc(s.phone)}</td>
+      ${mgr.staff.map(s => `<tr class="${s.active ? '' : 'off'}"><td>${esc(s.name)} ${onoff(s.active)}${s.skip_ann ? ' <span class="chip" title="Not tracked reading announcements">no reads</span>' : ''}${s.skip_tasks ? ' <span class="chip" title="Not part of tasks for everyone">no team tasks</span>' : ''}</td><td>${s.role}</td><td>${esc(s.phone)}</td>
         <td class="mini">${!s.phone ? '—' : s.sms_consent_at ? `<span class="chip sms">opted in</span> ${esc(fmtShort(String(s.sms_consent_at).slice(0, 10)))}` : 'added by manager'}</td><td>${s.pin_shared ? '<span class="chip due">shared</span>' : s.has_pin ? 'set' : s.active ? '<span class="chip due">none</span>' : '—'}</td>
         <td class="acts"><button class="mini-btn" onclick="editStaff(${s.id})">Edit</button> <button class="mini-btn danger" onclick="delStaff(${s.id})">Delete</button></td></tr>`).join('')
         || '<tr><td colspan="6" class="empty">No one yet — until you add people, the board asks signers to type their name.</td></tr>'}
@@ -1050,10 +1090,9 @@ window.editStaff = id => {
     ...(id ? [{ k: 'clear_pin', l: 'Remove PIN', v: '0', type: 'select', opts: [['0', 'No'], ['1', 'Yes — no PIN needed']] }] : []),
     { k: 'skip_ann', l: 'Exempt from marking announcements read', v: s.skip_ann ? '1' : '0', type: 'select', opts: [['0', 'No — has to read them'], ['1', 'Yes — exempt']] },
     { k: 'skip_tasks', l: 'Exempt from tasks assigned to everyone', v: s.skip_tasks ? '1' : '0', type: 'select', opts: [['0', 'No — has to do them'], ['1', 'Yes — exempt (still gets tasks given to them by name)']] },
-    { k: 'skip_evals', l: 'Exempt from peer evaluations', v: s.skip_evals ? '1' : '0', type: 'select', opts: [['0', 'No — has to do them'], ['1', 'Yes — exempt (teammates can still rate them)']] },
     { k: 'active', l: 'Active', v: s.active ? '1' : '0', type: 'select', opts: [['1', 'Yes'], ['0', 'No — hidden from the board']] },
   ], f => {
-    const body = { id, name: f.name, role: f.role, phone: f.phone, active: f.active === '1', skip_ann: f.skip_ann === '1', skip_tasks: f.skip_tasks === '1', skip_evals: f.skip_evals === '1' };
+    const body = { id, name: f.name, role: f.role, phone: f.phone, active: f.active === '1', skip_ann: f.skip_ann === '1', skip_tasks: f.skip_tasks === '1' };
     if (f.clear_pin === '1') body.pin = ''; else if (f.pin) body.pin = f.pin;
     return api('/api/manager/staff', body);
   });
@@ -1146,6 +1185,14 @@ window.downloadCsv = () => {
 };
 
 // ---------- Evaluations tab ----------
+function mgrHighlights() {
+  const rows = mgr.highlights || [];
+  return `<p class="kicker-note">Shift highlights and peer shoutouts posted from the board (last 90 days). Everyone with notifications on is told when one is posted; the board shows the last 7 days. Remove anything that doesn't belong.</p>
+    <table class="list"><tr><th></th><th>What was shared</th><th>When</th><th></th></tr>
+      ${rows.map(h => `<tr><td>${h.kind === 'shoutout' ? '👏' : '⭐'}</td><td>${h.kind === 'shoutout' ? `<b>${esc(h.author_name)}</b> → <b>${esc(h.subject_name)}</b><br>` : `<b>${esc(h.author_name)}</b><br>`}${esc(h.body)}</td><td class="mini">${esc(fmtStamp(h.created_at))}</td>
+        <td class="acts"><button class="mini-btn danger" onclick="clearItem({highlight_id:${h.id}})">Remove</button></td></tr>`).join('') || '<tr><td colspan="4" class="empty">Nothing yet.</td></tr>'}
+    </table>`;
+}
 let evalWeek = '';
 window.evalWeekTo = w => { evalWeek = w; renderManager(); };
 function mgrEvals() {

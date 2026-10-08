@@ -231,3 +231,7 @@ pre.cmds { background: #f6f8fa; border: 1px solid var(--line); border-radius: 10
 @keyframes dbspin { to { transform: rotate(360deg); } }
 #refreshHint { position: fixed; top: 8px; left: 50%; transform: translate(-50%, -16px); background: #111827; color: #fff; padding: 6px 14px; border-radius: 999px; font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; z-index: 100; }
 #refreshHint.show { opacity: .92; transform: translate(-50%, 0); }
+.hl { display: flex; gap: 10px; align-items: flex-start; padding: 10px 0; border-top: 1px solid var(--line); font-size: 14.5px; }
+.hl:first-of-type { border-top: 0; }
+.hl-ic { font-size: 20px; line-height: 1.2; }
+.hl > div { min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
