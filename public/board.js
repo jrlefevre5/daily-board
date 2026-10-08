@@ -333,12 +333,13 @@ function render() {
 // ---------- peer evaluations ----------
 function evalPanel(canDo) {
   const pe = data.peer_eval;
-  if (!pe || !pe.enabled || !data.staff.length) return '';
-  const n = data.staff.filter(s => pe.done.includes(s.id)).length;
+  const raters = data.staff.filter(s => !s.skip_evals);   // people exempted from evaluations aren't expected to do one
+  if (!pe || !pe.enabled || !raters.length) return '';
+  const n = raters.filter(s => pe.done.includes(s.id)).length;
   return `<div class="panel">
-    <h2>Peer evaluations <span class="count">week of ${esc(fmtShort(pe.week))} · ${n} / ${data.staff.length} done</span></h2>
+    <h2>Peer evaluations <span class="count">week of ${esc(fmtShort(pe.week))} · ${n} / ${raters.length} done</span></h2>
     <p class="mini" style="margin:0 0 10px">Each person rates one teammate a week — pick someone different each time. Only managers see what you write.</p>
-    <div class="people">${data.staff.map(s => pe.done.includes(s.id)
+    <div class="people">${raters.map(s => pe.done.includes(s.id)
       ? `<span class="person done">✓ ${esc(s.name)}</span>`
       : `<button class="person" ${canDo ? `onclick="openEval(${s.id})"` : 'disabled'}>${esc(s.name)}</button>`).join('')}</div>
     ${canDo ? `<div style="margin-top:12px"><button class="small" onclick="openEval(0)">Evaluate a teammate</button></div>` : ''}
@@ -363,7 +364,7 @@ window.openEval = staffId => {
   }
   $modal.innerHTML = `<div class="modal-back" onclick="if(event.target===this)closeModal()"><div class="modal" style="max-width:600px">
     <h3>Peer evaluation</h3><p class="sub">Week of ${esc(fmtShort(pe.week))}. Honest and specific helps most — managers read these, teammates don't.</p>
-    ${data.require_pin ? `<div class="notice" style="margin:0 0 4px">Evaluating as <b>${esc(signWho)}</b> · <a href="#" onclick="evalBack(); return false">not you?</a></div>` : staffPicker('ev', data.staff.filter(s => !pe.done.includes(s.id)).map(s => s.id), staffId)}
+    ${data.require_pin ? `<div class="notice" style="margin:0 0 4px">Evaluating as <b>${esc(signWho)}</b> · <a href="#" onclick="evalBack(); return false">not you?</a></div>` : staffPicker('ev', data.staff.filter(s => !s.skip_evals && !pe.done.includes(s.id)).map(s => s.id), staffId)}
     <div id="ev_notice"></div>
     <label>Who are you evaluating?</label>
     <select class="inline" id="ev_subject"><option value="">${data.require_pin ? 'Loading…' : 'Pick your name first…'}</option></select>
@@ -485,7 +486,7 @@ function watchAnnouncements() {
   if (annObserver) annObserver.disconnect();
   for (const t of annTimers.values()) clearTimeout(t);
   annTimers.clear();
-  if (!data.me || !('IntersectionObserver' in window)) return;
+  if (!data.me || data.me.skip_ann || !('IntersectionObserver' in window)) return;   // exempt people aren't tracked as readers
   const meName = String(data.me.name).toLowerCase();
   const todo = new Set(data.announcements.filter(a => !a.acks.some(x => String(x.staff_name).toLowerCase() === meName)).map(a => a.id));
   if (!todo.size) return;
@@ -992,7 +993,8 @@ function mgrAnns() {
   const why = a => ({ off: 'switched off', expired: 'expired', aged: `older than ${days} days` })[a.hidden_why] || 'hidden';
   const row = a => `<tr class="${a.on_board ? '' : 'off'}"><td>${a.pinned ? '<span class="chip pin">Pinned</span> ' : ''}${a.title ? `<b>${esc(a.title)}</b><br>` : ''}${esc(a.body).slice(0, 300)} ${a.on_board ? '' : `<span class="chip due">${esc(why(a))}</span>`}
       ${a.media_url ? `<div class="mini"><a href="${attr(a.media_url)}" target="_blank" rel="noopener">photo</a></div>` : ''}${a.expires_on ? `<div class="mini">until ${esc(fmtShort(a.expires_on))}</div>` : ''}
-      <div class="mini"><b>Read by ${a.acks.length}:</b> ${a.acks.length ? a.acks.map(x => esc(x.staff_name)).join(', ') : 'nobody yet'}</div></td>
+      <div class="mini"><b>Read by ${a.acks.length}:</b> ${a.acks.length ? a.acks.map(x => esc(x.staff_name)).join(', ') : 'nobody yet'}</div>
+      ${a.unread && a.unread.length && a.on_board ? `<div class="mini"><b>Not read yet:</b> ${a.unread.map(esc).join(', ')}</div>` : ''}</td>
     <td class="mini">${esc(a.created_by)}${a.source === 'sms' ? ' <span class="chip sms">text</span>' : ''}<br>${esc(fmtStamp(a.created_at))}</td>
     <td class="acts"><button class="mini-btn" onclick="editAnn(${a.id})">Edit</button> <button class="mini-btn danger" onclick="delAnn(${a.id})">Delete</button></td></tr>`;
   return `<div class="tools"><div class="spacer"></div><button class="small" onclick="editAnn()">+ Post announcement</button></div>
@@ -1031,7 +1033,7 @@ function mgrStaff() {
     <div class="tools"><div class="spacer"></div><button class="small" onclick="editStaff()">+ Add person</button></div>
     <p class="mini" style="margin:-6px 0 12px">Text opt-in page for staff (also what Twilio asks for as the opt-in policy): <code class="url">${esc(location.origin + '/sms.html')}</code></p>
     <table class="list"><tr><th>Name</th><th>Role</th><th>Phone</th><th>Texts</th><th>PIN</th><th></th></tr>
-      ${mgr.staff.map(s => `<tr class="${s.active ? '' : 'off'}"><td>${esc(s.name)} ${onoff(s.active)}</td><td>${s.role}</td><td>${esc(s.phone)}</td>
+      ${mgr.staff.map(s => `<tr class="${s.active ? '' : 'off'}"><td>${esc(s.name)} ${onoff(s.active)}${s.skip_ann ? ' <span class="chip" title="Not tracked reading announcements">no reads</span>' : ''}${s.skip_tasks ? ' <span class="chip" title="Not part of tasks for everyone">no team tasks</span>' : ''}${s.skip_evals ? ' <span class="chip" title="Does not do peer evaluations">no evals</span>' : ''}</td><td>${s.role}</td><td>${esc(s.phone)}</td>
         <td class="mini">${!s.phone ? '—' : s.sms_consent_at ? `<span class="chip sms">opted in</span> ${esc(fmtShort(String(s.sms_consent_at).slice(0, 10)))}` : 'added by manager'}</td><td>${s.pin_shared ? '<span class="chip due">shared</span>' : s.has_pin ? 'set' : s.active ? '<span class="chip due">none</span>' : '—'}</td>
         <td class="acts"><button class="mini-btn" onclick="editStaff(${s.id})">Edit</button> <button class="mini-btn danger" onclick="delStaff(${s.id})">Delete</button></td></tr>`).join('')
         || '<tr><td colspan="6" class="empty">No one yet — until you add people, the board asks signers to type their name.</td></tr>'}
@@ -1046,9 +1048,12 @@ window.editStaff = id => {
     { k: 'pin', l: id ? 'New PIN (blank = keep current)' : 'PIN (4–8 digits, unique to this person)', v: '', type: 'password', ph: id && s.has_pin ? '••••' : '', gen: true,
       hint: 'Their personal PIN is how they sign things off. PINs are never shown again after saving — write it down for them, or reset it here.' },
     ...(id ? [{ k: 'clear_pin', l: 'Remove PIN', v: '0', type: 'select', opts: [['0', 'No'], ['1', 'Yes — no PIN needed']] }] : []),
+    { k: 'skip_ann', l: 'Exempt from marking announcements read', v: s.skip_ann ? '1' : '0', type: 'select', opts: [['0', 'No — has to read them'], ['1', 'Yes — exempt']] },
+    { k: 'skip_tasks', l: 'Exempt from tasks assigned to everyone', v: s.skip_tasks ? '1' : '0', type: 'select', opts: [['0', 'No — has to do them'], ['1', 'Yes — exempt (still gets tasks given to them by name)']] },
+    { k: 'skip_evals', l: 'Exempt from peer evaluations', v: s.skip_evals ? '1' : '0', type: 'select', opts: [['0', 'No — has to do them'], ['1', 'Yes — exempt (teammates can still rate them)']] },
     { k: 'active', l: 'Active', v: s.active ? '1' : '0', type: 'select', opts: [['1', 'Yes'], ['0', 'No — hidden from the board']] },
   ], f => {
-    const body = { id, name: f.name, role: f.role, phone: f.phone, active: f.active === '1' };
+    const body = { id, name: f.name, role: f.role, phone: f.phone, active: f.active === '1', skip_ann: f.skip_ann === '1', skip_tasks: f.skip_tasks === '1', skip_evals: f.skip_evals === '1' };
     if (f.clear_pin === '1') body.pin = ''; else if (f.pin) body.pin = f.pin;
     return api('/api/manager/staff', body);
   });
@@ -1152,7 +1157,7 @@ function mgrEvals() {
   const bySubject = {};
   for (const e of rows) (bySubject[e.subject_name] = bySubject[e.subject_name] || []).push(e);
   const avg = arr => arr.length ? (arr.reduce((a, b) => a + b, 0) / arr.length).toFixed(1) : '—';
-  const active = mgr.staff.filter(s => s.active);
+  const active = mgr.staff.filter(s => s.active && !s.skip_evals);
   const missing = active.filter(s => !rows.some(e => e.evaluator_id === s.id)).map(s => s.name);
   return `<div class="tools"><b>Week of</b>
       <select class="inline" onchange="evalWeekTo(this.value)">${weeks.map(w => `<option value="${w}" ${w === evalWeek ? 'selected' : ''}>${esc(fmtShort(w))} – ${esc(fmtShort(addDays(w, 6)))}${w === thisWeek ? ' (this week)' : ''}</option>`).join('')}</select>
