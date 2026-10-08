@@ -69,8 +69,8 @@ function recordFail(req) {
 const fingerprint = v => crypto.createHash('sha256').update(String(v)).digest('hex').slice(0, 12);
 async function makeToken(role, staff) {
   const secret = await db.getSetting('token_secret', '');
-  const pw = role === 'person' ? staff.pin : await db.getSetting(role === 'manager' ? 'manager_pin' : 'board_pass', '');
-  const payload = `${role}|${fingerprint(pw)}|${Date.now() + 24 * 30 * 3600 * 1000}` + (role === 'person' ? `|${staff.id}` : '');
+  const pw = role === 'person' || role === 'staffmgr' ? staff.pin : await db.getSetting(role === 'manager' ? 'manager_pin' : 'board_pass', '');
+  const payload = `${role}|${fingerprint(pw)}|${Date.now() + 24 * 30 * 3600 * 1000}` + (role === 'person' || role === 'staffmgr' ? `|${staff.id}` : '');
   const sig = crypto.createHmac('sha256', secret).update(payload).digest('hex');
   return Buffer.from(`${payload}|${sig}`).toString('base64url');
 }
@@ -82,12 +82,16 @@ async function readTokenFull(header) {
     const i = raw.lastIndexOf('|');
     const payload = raw.slice(0, i), sig = raw.slice(i + 1);
     const [role, fp, exp, sid] = payload.split('|');
-    if (!['board', 'manager', 'person'].includes(role) || !(Number(exp) > Date.now())) return null;
+    if (!['board', 'manager', 'person', 'staffmgr'].includes(role) || !(Number(exp) > Date.now())) return null;
     const want = crypto.createHmac('sha256', await db.getSetting('token_secret', '')).update(payload).digest('hex');
     if (!safeEqual(sig, want)) return null;
     if (role === 'person') {
       const s = await one('SELECT id, pin FROM staff WHERE id = $1 AND active = 1', [Number(sid)]);
       return s && s.pin && fingerprint(s.pin) === fp ? { role: 'board', staffId: s.id } : null; // PIN changed or person removed = signed out
+    }
+    if (role === 'staffmgr') { // a staff manager's own PIN: full manager access, and the board knows who they are
+      const s = await one("SELECT id, pin FROM staff WHERE id = $1 AND active = 1 AND role = 'manager'", [Number(sid)]);
+      return s && s.pin && fingerprint(s.pin) === fp ? { role: 'manager', staffId: s.id } : null; // PIN changed, demoted or removed = signed out
     }
     const pw = await db.getSetting(role === 'manager' ? 'manager_pin' : 'board_pass', '');
     if (role === 'board' && !pw) return null; // board password removed = board access removed
@@ -147,7 +151,8 @@ app.post('/api/login', wrap(async (req, res) => {
     if (code && pin && safeEqual(code, pin)) return res.json({ ok: true, role: 'manager', token: await makeToken('manager') });
     if (code && pass && safeEqual(code, pass)) return res.json({ ok: true, role: 'board', token: await makeToken('board') });
     if (code) { // an employee's own PIN: opens the board as that person
-      const hits = (await q("SELECT id, name, pin FROM staff WHERE active = 1 AND pin <> ''")).filter(s => safeEqual(code, s.pin));
+      const hits = (await q("SELECT id, name, pin, role FROM staff WHERE active = 1 AND pin <> ''")).filter(s => safeEqual(code, s.pin));
+      if (hits.length === 1 && hits[0].role === 'manager') return res.json({ ok: true, role: 'manager', name: hits[0].name, token: await makeToken('staffmgr', hits[0]) });
       if (hits.length === 1) return res.json({ ok: true, role: 'person', name: hits[0].name, token: await makeToken('person', hits[0]) });
       if (hits.length > 1) return res.status(401).json({ error: 'That PIN is used by more than one person — ask a manager for a new one.' });
     }
@@ -157,6 +162,8 @@ app.post('/api/login', wrap(async (req, res) => {
   if (b.manager_pin != null) {
     const pin = await db.getSetting('manager_pin', '');
     if (pin && safeEqual(String(b.manager_pin).trim(), pin)) return res.json({ ok: true, role: 'manager', token: await makeToken('manager') });
+    const mine = (await q("SELECT id, name, pin FROM staff WHERE active = 1 AND role = 'manager' AND pin <> ''")).filter(s => safeEqual(String(b.manager_pin).trim(), s.pin));
+    if (mine.length === 1) return res.json({ ok: true, role: 'manager', name: mine[0].name, token: await makeToken('staffmgr', mine[0]) });
     recordFail(req);
     return res.status(401).json({ error: 'Wrong manager PIN.' });
   }
