@@ -341,6 +341,10 @@ function highlightsPanel(canDo) {
     ${list.length ? list.map(item).join('') : `<div class="empty">Nothing shared this week yet — tell the team about something good that happened on your shift.</div>`}
   </div>`;
 }
+window.sendRemindersNow = async weekly => {
+  const out = await api('/api/manager/send-reminders', { weekly: !!weekly }), el = document.getElementById('st_remind_out');
+  if (el) el.textContent = out.error ? out.error : out.open ? `Sent to ${out.sent} device${out.sent === 1 ? '' : 's'} (${out.open} open task${out.open === 1 ? '' : 's'}).` : 'Nothing is open.';
+};
 window.openHL = kind => {
   const shout = kind === 'shoutout';
   $modal.innerHTML = `<div class="modal-back" onclick="if(event.target===this)closeModal()"><div class="modal">
@@ -1290,6 +1294,12 @@ function mgrSettings() {
     ${f('st_pin', 'Manager PIN', s.manager_pin, 'Unlocks this panel. Change it from the default!')}
     <b style="display:block;margin-top:22px">Announcements</b>
     ${f('st_annDays', 'Hide announcements after (days)', s.announce_days, '0 = never. They leave the board on their own after this many days and move to the archive on the Announcements tab (with who read them). Pinned ones stay; a "Hide after" date on an announcement wins.', 'type="number" min="0" max="365"')}
+    <b style="display:block;margin-top:22px">Task reminder</b>
+    ${f('st_remind', 'Remind about open tasks at (store time)', s.reminder_time, 'Leave blank for no reminder. Once this time passes, anyone who still owes a task today gets a notification (managers get the full list), at most once a day. The built-in timer checks once a day around 3 PM Mountain, so a time after that only fires if an outside timer also calls /api/cron/reminders (for example cron-job.org every 15 minutes).', 'type="time"')}
+    <label for="st_wday">Weekly reminder (open weekly tasks + a nudge to give a shoutout)</label>
+    <select class="inline" id="st_wday" style="width:100%">${[['', 'Off'], ['1', 'Monday'], ['2', 'Tuesday'], ['3', 'Wednesday'], ['4', 'Thursday'], ['5', 'Friday'], ['6', 'Saturday'], ['0', 'Sunday']].map(([v, l]) => `<option value="${v}" ${String(s.weekly_reminder_day || '') === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+    <div class="help">Sent on that day at the reminder time above (3 PM if none is set), once a week.</div>
+    <div style="margin-top:6px"><button type="button" class="mini-btn" onclick="sendRemindersNow()">Send a daily reminder now</button> <button type="button" class="mini-btn" onclick="sendRemindersNow(true)">Send the weekly reminder now</button> <span class="mini" id="st_remind_out"></span></div>
     <b style="display:block;margin-top:22px">Shift highlights &amp; shoutouts</b>
     ${f('st_hlDays', 'Keep highlights on the board for (days)', s.highlight_days, '0 = keep showing the latest ones. After this many days they leave the board but stay in the manager Highlights tab (90 days).', 'type="number" min="0" max="365"')}
     <b style="display:block;margin-top:22px">Spreadsheet (goal actuals)</b>
@@ -1358,7 +1368,7 @@ window.saveSettings = async () => {
   if (g('st_reqpin') === '1' && !mgr.settings.require_pin && (pi.missing || pi.shared) &&
       !confirm(`${pi.missing} active ${pi.missing === 1 ? 'person has' : 'people have'} no PIN and ${pi.shared} ${pi.shared === 1 ? 'has' : 'have'} a shared PIN. They won't be able to sign anything until they get one. Turn it on anyway?`)) return;
   const out = await api('/api/manager/settings', {
-    timezone: g('st_tz'), board_pass: g('st_pass'), manager_pin: g('st_pin'), require_pin: g('st_reqpin'), announce_days: g('st_annDays'), highlight_days: g('st_hlDays'), sheet_url: g('st_sheet'), sms_number: g('st_num'), sms_default_kind: g('st_kind'), sms_reply: g('st_reply'), sms_notify: g('st_notify'), sms_broadcast: g('st_bcast'),
+    timezone: g('st_tz'), board_pass: g('st_pass'), manager_pin: g('st_pin'), require_pin: g('st_reqpin'), announce_days: g('st_annDays'), highlight_days: g('st_hlDays'), reminder_time: g('st_remind'), weekly_reminder_day: g('st_wday'), sheet_url: g('st_sheet'), sms_number: g('st_num'), sms_default_kind: g('st_kind'), sms_reply: g('st_reply'), sms_notify: g('st_notify'), sms_broadcast: g('st_bcast'),
   });
   if (out.error) { document.getElementById('st_err').textContent = out.error; return; }
   if (out.token) { mgrToken = out.token; localStorage.setItem('db_mgr_token', mgrToken); }
