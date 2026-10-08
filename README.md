@@ -135,6 +135,11 @@ sends a push, free, when:
   or with the PIN of someone who has the Manager role): "✓ Sam completed: Open
   store", with progress like "(2 of 5)" for tasks several people each sign.
 
+Each push (and each text) says who it's from — *Announcement from Harold*, *Task from
+Jason* — and the same line shows on the board's announcement and task cards. For texted-in
+posts it's the sender's name on Staff; for posts made in the manager panel it's the name in
+that panel's "Your name (shown on posts)" box. Generic senders ("Manager") show no "from" line.
+
 Pushes come in addition to texts, never instead of them. Tapping one opens the
 board and refreshes it. **iPhone / iPad:** notifications only work from the
 installed home-screen app (iOS 16.4+), not from a Safari tab. The push keys are

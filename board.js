@@ -228,6 +228,8 @@ function mount(app, deps) {
   const requirePin = async () => (await db.getSetting('require_pin', '0')) === '1';
   // Announcements leave the board on their own after this many days (0 = never). Pinned ones stay, and an
   // announcement's own "Hide after" date wins. They're kept — with who read them — in the manager portal.
+  // Who posted it, for "Announcement from Harold" / "Task from Jason" — generic fallbacks ("Manager") say nothing useful.
+  const named = n => { n = String(n || '').trim(); return n && !/^manager(ment)?$/i.test(n) ? n : ''; };
   const announceDays = async () => { const n = Math.round(Number(await db.getSetting('announce_days', '7'))); return Number.isFinite(n) ? Math.max(0, Math.min(365, n)) : 7; };
 
   // ---------- goal actuals from a spreadsheet ----------
@@ -312,7 +314,7 @@ function mount(app, deps) {
     try {
       const subs = await q('SELECT * FROM push_subscriptions WHERE staff_id IS NULL OR staff_id <> $1', [skipStaffId]);
       const biz = await db.getSetting('business_name', 'Daily Board');
-      return await sendPush(subs, { title: `${biz}: new announcement`, body: `${ann.title ? ann.title + ' — ' : ''}${ann.body}`.slice(0, 160), tag: 'ann-' + ann.id, url: '/' });
+      return await sendPush(subs, { title: named(ann.created_by) ? `Announcement from ${named(ann.created_by)}` : `${biz}: new announcement`, body: `${ann.title ? ann.title + ' — ' : ''}${ann.body}`.slice(0, 160), tag: 'ann-' + ann.id, url: '/' });
     } catch (e) { console.warn('push error:', e && e.message); return { sent: 0 }; }
   }
   // A task for named people goes to their devices; a task for everyone goes to every device.
@@ -322,7 +324,7 @@ function mount(app, deps) {
         ? await q('SELECT * FROM push_subscriptions WHERE staff_id = ANY($1::int[]) AND staff_id <> $2', [assignees, skipStaffId])
         : await q('SELECT * FROM push_subscriptions WHERE staff_id IS NULL OR staff_id <> $1', [skipStaffId]);
       const biz = await db.getSetting('business_name', 'Daily Board');
-      return await sendPush(subs, { title: `${biz}: new task`, body: `${assignees.length ? 'For you' : 'For everyone'} — ${task.title}`.slice(0, 160), tag: 'task-' + task.id, url: '/' });
+      return await sendPush(subs, { title: named(task.created_by) ? `Task from ${named(task.created_by)}` : `${biz}: new task`, body: `${assignees.length ? 'For you' : 'For everyone'} — ${task.title}`.slice(0, 160), tag: 'task-' + task.id, url: '/' });
     } catch (e) { console.warn('push error:', e && e.message); return { sent: 0 }; }
   }
   // Managers' devices — signed in with the manager PIN, or belonging to someone with the Manager role —
@@ -360,7 +362,8 @@ function mount(app, deps) {
     if (!smsOutboundReady()) return { sent: 0 };
     const people = await q("SELECT id, name, phone FROM staff WHERE active = 1 AND phone <> ''");
     const biz = await db.getSetting('business_name', 'Daily Board');
-    const text = `${biz}: ${ann.title ? ann.title + ' — ' : ''}${ann.body}`.slice(0, 600);
+    const from = named(ann.created_by);
+    const text = `${biz}: ${from ? `announcement from ${from} — ` : ''}${ann.title ? ann.title + ' — ' : ''}${ann.body}`.slice(0, 600);
     let sent = 0;
     for (const p of people) {
       if (skipPhoneKey && phoneKey(p.phone) === skipPhoneKey) continue;
@@ -381,7 +384,8 @@ function mount(app, deps) {
       : await q("SELECT id, name, phone FROM staff WHERE active = 1 AND phone <> ''");
     const biz = await db.getSetting('business_name', 'Daily Board');
     const when = task.kind === 'daily' ? ' (every day)' : task.kind === 'weekly' ? ` (weekly${task.day_of_week != null ? ', due ' + DOW_SHORT[task.day_of_week] : ''})` : '';
-    const body = `${biz}: new task for you — "${task.title}"${when}. Sign it off on the board when it's done.`;
+    const from = named(task.created_by);
+    const body = `${biz}: new task${from ? ` from ${from}` : ''} for you — "${task.title}"${when}. Sign it off on the board when it's done.`;
     let sent = 0;
     for (const p of people) {
       if (skipPhoneKey && phoneKey(p.phone) === skipPhoneKey) continue;
@@ -951,8 +955,8 @@ function mount(app, deps) {
       id = (await one(`INSERT INTO tasks (kind, title, detail, day_of_week, due_date, sort, active, source, created_by, assign, assignees)
         VALUES ($1,$2,$3,$4,$5,$6,$7,'manual',$8,$9,$10) RETURNING id`, [kind, title, detail, dow, due, sort, active, by, assign, JSON.stringify(assignees)])).id;
       if (assign === 'each' && active && !isOff(b.notify)) {
-        await pushTask({ id, title }, assignees);
-        const { sent } = await notifyTask({ id, kind, title, day_of_week: dow }, assignees);
+        await pushTask({ id, title, created_by: by }, assignees);
+        const { sent } = await notifyTask({ id, kind, title, day_of_week: dow, created_by: by }, assignees);
         return res.json({ ok: true, id, notified: sent });
       }
     }
@@ -975,9 +979,9 @@ function mount(app, deps) {
     else {
       id = (await one(`INSERT INTO announcements (title, body, media_url, pinned, expires_on, active, source, created_by)
         VALUES ($1,$2,$3,$4,$5,$6,'manual',$7) RETURNING id`, [title, body, media, pinned, expires, active, by])).id;
-      if (active) await pushAnnouncement({ id, title, body });
+      if (active) await pushAnnouncement({ id, title, body, created_by: by });
       const want = b.text_everyone != null ? !isOff(b.text_everyone) : await db.getSetting('sms_broadcast', '0') === '1';
-      if (want && active) { const { sent } = await broadcastAnnouncement({ id, title, body, media_url: media }); return res.json({ ok: true, id, notified: sent }); }
+      if (want && active) { const { sent } = await broadcastAnnouncement({ id, title, body, media_url: media, created_by: by }); return res.json({ ok: true, id, notified: sent }); }
     }
     res.json({ ok: true, id });
   }));
@@ -1151,9 +1155,9 @@ function mount(app, deps) {
         VALUES ('', $1, $2, 0, 1, 'sms', $3) RETURNING id`, [cmd.text || '(photo)', media, sender.name]);
       action = 'announcement'; targetId = row.id;
       msg = `Posted to announcements ✓${media ? ' (with photo)' : ''}`;
-      await pushAnnouncement({ id: row.id, title: '', body: cmd.text || '(photo)' }, sender.id);
+      await pushAnnouncement({ id: row.id, title: '', body: cmd.text || '(photo)', created_by: sender.name }, sender.id);
       if (await db.getSetting('sms_broadcast', '0') === '1') {
-        const { sent } = await broadcastAnnouncement({ id: row.id, title: '', body: cmd.text || '(photo)', media_url: media }, key);
+        const { sent } = await broadcastAnnouncement({ id: row.id, title: '', body: cmd.text || '(photo)', media_url: media, created_by: sender.name }, key);
         if (sent) msg += ` Texted ${sent} ${sent === 1 ? 'person' : 'people'}.`;
       }
     } else if (cmd.action === 'task') {
@@ -1173,8 +1177,8 @@ function mount(app, deps) {
       msg = (cmd.kind === 'once' ? "Added to today's tasks" : cmd.kind === 'daily' ? 'Added as a daily task'
         : `Added as a weekly task${cmd.dow != null ? ` (due ${DOW_SHORT[cmd.dow]})` : ''}`) + whoNote + ' ✓';
       if (assign === 'each') {
-        await pushTask({ id: row.id, title: cmd.text.slice(0, 200) }, assignees, sender.id);
-        const { sent } = await notifyTask({ id: row.id, kind: cmd.kind, title: cmd.text.slice(0, 200), day_of_week: cmd.dow ?? null }, assignees, key);
+        await pushTask({ id: row.id, title: cmd.text.slice(0, 200), created_by: sender.name }, assignees, sender.id);
+        const { sent } = await notifyTask({ id: row.id, kind: cmd.kind, title: cmd.text.slice(0, 200), day_of_week: cmd.dow ?? null, created_by: sender.name }, assignees, key);
         if (sent) msg += ` Texted ${sent} ${sent === 1 ? 'person' : 'people'}.`;
       }
     } else if (cmd.action === 'goal') {
