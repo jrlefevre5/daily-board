@@ -458,7 +458,11 @@ const goalCard = canSign => g => {
 };
 
 const readByHtml = a => a.acks.length ? `<b>Read by:</b> ${a.acks.map(x => esc(x.staff_name)).join(', ')}` : '';
+// Who posted it (a name, not the generic "Manager"), for "Announcement from Harold" / "Task from Jason".
+const fromName = n => { n = String(n || '').trim(); return n && !/^manager(ment)?$/i.test(n) ? n : ''; };
+const fromLine = (what, n) => fromName(n) ? `<div class="mini" style="margin-bottom:2px">${what} from <b>${esc(fromName(n))}</b></div>` : '';
 const annCard = canSign => a => `<div class="ann ${a.pinned ? 'pinned' : ''}" data-ann="${a.id}">
+  ${fromLine('Announcement', a.created_by)}
   <div class="head">
     ${a.pinned ? '<span class="chip pin">Pinned</span>' : ''}
     ${a.title ? `<span class="title">${esc(a.title)}</span>` : ''}
@@ -529,6 +533,7 @@ const taskRow = canSign => t => {
         ${t.kind === 'once' ? '<span class="chip">One-time</span>' : ''}
         ${t.source === 'sms' ? '<span class="chip sms">Texted in</span>' : ''}
       </div>
+      ${fromLine('Task', t.created_by)}
       ${t.detail ? `<div class="detail">${esc(t.detail)}</div>` : ''}
       ${c ? `<div class="signed">Signed off by ${esc(c.staff_name)} · ${esc(fmtStamp(c.signed_at))}
           ${c.signature_kind === 'drawn' ? `<img src="${attr(c.signature)}" alt="signature">` : `<span class="typed">${esc(c.signature)}</span>`}
@@ -551,6 +556,7 @@ function eachRow(canSign, t) {
         ${t.kind === 'once' ? '<span class="chip">One-time</span>' : ''}
         ${t.source === 'sms' ? '<span class="chip sms">Texted in</span>' : ''}
       </div>
+      ${fromLine('Task', t.created_by)}
       ${t.detail ? `<div class="detail">${esc(t.detail)}</div>` : ''}
       <div class="people">
         ${people.map(p => { const c = t.completions.find(x => x.staff_id === p.id);
