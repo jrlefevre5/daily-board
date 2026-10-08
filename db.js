@@ -59,6 +59,10 @@ CREATE TABLE IF NOT EXISTS staff (
   active INTEGER NOT NULL DEFAULT 1,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Per-person exemptions (all off by default: everyone does everything).
+ALTER TABLE staff ADD COLUMN IF NOT EXISTS skip_announcements BOOLEAN NOT NULL DEFAULT false;   -- not tracked as reading announcements
+ALTER TABLE staff ADD COLUMN IF NOT EXISTS skip_everyone_tasks BOOLEAN NOT NULL DEFAULT false;  -- not required for tasks assigned to everyone
+ALTER TABLE staff ADD COLUMN IF NOT EXISTS skip_peer_evals BOOLEAN NOT NULL DEFAULT false;      -- doesn't have to submit peer evaluations
 -- Recurring goal definitions, copied onto each new day the board is opened.
 CREATE TABLE IF NOT EXISTS goal_templates (
   id SERIAL PRIMARY KEY,
@@ -234,7 +238,7 @@ END $$;
 `;
 
 // Bump when DDL or defaults change; a mismatch replays the (idempotent) migration.
-const SCHEMA_VERSION = '10';
+const SCHEMA_VERSION = '11';
 
 async function ensureDefaults() {
   const setDefault = (k, v) => q('INSERT INTO settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO NOTHING', [k, v]);

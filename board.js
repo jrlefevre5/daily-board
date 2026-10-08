@@ -322,7 +322,8 @@ function mount(app, deps) {
     try {
       const subs = assignees.length
         ? await q('SELECT * FROM push_subscriptions WHERE staff_id = ANY($1::int[]) AND staff_id <> $2', [assignees, skipStaffId])
-        : await q('SELECT * FROM push_subscriptions WHERE staff_id IS NULL OR staff_id <> $1', [skipStaffId]);
+        : await q(`SELECT p.* FROM push_subscriptions p LEFT JOIN staff s ON s.id = p.staff_id
+            WHERE (p.staff_id IS NULL OR p.staff_id <> $1) AND NOT COALESCE(s.skip_everyone_tasks, false)`, [skipStaffId]);   // "everyone" leaves out the exempt
       const biz = await db.getSetting('business_name', 'Daily Board');
       return await sendPush(subs, { title: named(task.created_by) ? `Task from ${named(task.created_by)}` : `${biz}: new task`, body: `${assignees.length ? 'For you' : 'For everyone'} — ${task.title}`.slice(0, 160), tag: 'task-' + task.id, url: '/' });
     } catch (e) { console.warn('push error:', e && e.message); return { sent: 0 }; }
@@ -381,7 +382,7 @@ function mount(app, deps) {
     if (!smsOutboundReady() || await db.getSetting('sms_notify', '1') === '0') return { sent: 0 };
     const people = assignees.length
       ? await q("SELECT id, name, phone FROM staff WHERE active = 1 AND phone <> '' AND id = ANY($1::int[])", [assignees])
-      : await q("SELECT id, name, phone FROM staff WHERE active = 1 AND phone <> ''");
+      : await q("SELECT id, name, phone FROM staff WHERE active = 1 AND phone <> '' AND NOT skip_everyone_tasks");   // "everyone" leaves out the exempt
     const biz = await db.getSetting('business_name', 'Daily Board');
     const when = task.kind === 'daily' ? ' (every day)' : task.kind === 'weekly' ? ` (weekly${task.day_of_week != null ? ', due ' + DOW_SHORT[task.day_of_week] : ''})` : '';
     const from = named(task.created_by);
@@ -435,7 +436,7 @@ function mount(app, deps) {
          WHERE (g.period = 'day' AND g.date = $1) OR (g.period = 'month' AND g.date = $2) ORDER BY g.sort, g.id`, [date, date.slice(0, 7) + '-01']),
       q(`SELECT e.goal_id, e.amount, e.staff_name, e.note, e.created_at FROM goal_entries e
          JOIN goals g ON g.id = e.goal_id WHERE (g.period = 'day' AND g.date = $1) OR (g.period = 'month' AND g.date = $2) ORDER BY e.id`, [date, date.slice(0, 7) + '-01']),
-      q('SELECT id, name, role, pin FROM staff WHERE active = 1 ORDER BY name'),
+      q('SELECT id, name, role, pin, skip_announcements, skip_everyone_tasks, skip_peer_evals FROM staff WHERE active = 1 ORDER BY name'),
       q(`SELECT * FROM tasks WHERE active = 1 AND (kind = 'daily' OR (kind = 'once' AND due_date = $1) OR kind = 'weekly')
          ORDER BY sort, id`, [date]),
       q('SELECT * FROM task_completions WHERE period IN ($1, $2)', [date, ws]),
@@ -454,6 +455,7 @@ function mount(app, deps) {
     const pubDone = c => ({ id: c.id, staff_id: c.staff_id, staff_name: c.staff_name, signed_at: c.signed_at,
       signature: c.signature, signature_kind: c.signature_kind, note: c.note });
     const activeIds = staff.map(s => s.id);
+    const everyoneIds = staff.filter(s => !s.skip_everyone_tasks).map(s => s.id);   // who "everyone" means for tasks (exempt people left out)
     const ackBy = {};
     for (const a of acks) (ackBy[a.announcement_id] = ackBy[a.announcement_id] || []).push({ staff_name: a.staff_name, signed_at: a.signed_at });
     const tasks_today = [], tasks_week = [];
@@ -462,7 +464,7 @@ function mount(app, deps) {
       const comps = (doneBy[`${t.id}|${period}`] || []).map(pubDone);
       const assignees = parseIds(t.assignees);
       const each = t.assign === 'each';
-      const required = each ? (assignees.length ? assignees.filter(id => activeIds.includes(id)) : activeIds) : null;
+      const required = each ? (assignees.length ? assignees.filter(id => activeIds.includes(id)) : everyoneIds) : null;
       const row = { id: t.id, kind: t.kind, title: t.title, detail: t.detail, day_of_week: t.day_of_week, due_date: t.due_date,
         source: t.source, created_by: t.created_by, period, assign: each ? 'each' : 'anyone', assignees, required,
         completions: comps, completion: each ? null : (comps[0] || null),
@@ -475,7 +477,7 @@ function mount(app, deps) {
       ...brand,
       sms_number: settings.sms_number || '', board_pass_set: !!(settings.board_pass || '').trim(),
       require_pin: settings.require_pin === '1',   // true: signing needs the employee's own PIN (no name picker)
-      staff: staff.map(s => ({ id: s.id, name: s.name, role: s.role, has_pin: !!s.pin })),
+      staff: staff.map(s => ({ id: s.id, name: s.name, role: s.role, has_pin: !!s.pin, skip_evals: !!s.skip_peer_evals })),
       goals: goals.map(g => ({ id: g.id, label: g.label, unit: g.unit, target: Number(g.target), baseline: g.baseline == null ? null : Number(g.baseline),
         period: g.period, month: g.period === 'month' ? g.date.slice(0, 7) : null,
         linked: !!g.linked, sheet_at: g.sheet_at || null,   // linked = the actual comes from the spreadsheet
@@ -495,6 +497,8 @@ function mount(app, deps) {
   }
   // Teammates this person may rate this week: everyone active except themselves and
   // anyone they rated within the last repeat_weeks weeks.
+  const EXEMPT_EVAL = "You're exempt from peer evaluations.";
+  async function evalExempt(staffId) { const r = await one('SELECT skip_peer_evals FROM staff WHERE id = $1', [staffId]); return !!(r && r.skip_peer_evals); }
   async function evalOptions(evaluatorId, week, repeatWeeks) {
     const roster = await q('SELECT id, name FROM staff WHERE active = 1 AND id <> $1 ORDER BY name', [evaluatorId]);
     if (!repeatWeeks) return roster.map(s => ({ ...s, recent: false }));
@@ -508,6 +512,7 @@ function mount(app, deps) {
     const staffId = Number(req.query.staff_id);
     const s = await one('SELECT id, name FROM staff WHERE id = $1 AND active = 1', [staffId]);
     if (!s) return res.status(400).json({ error: 'Pick your name.' });
+    if (await evalExempt(s.id)) return res.status(403).json({ error: EXEMPT_EVAL });
     const already = await one('SELECT subject_name FROM peer_evals WHERE week = $1 AND evaluator_id = $2', [week, s.id]);
     res.json({ week, criteria: ev.criteria, already: already ? already.subject_name : null, options: await evalOptions(s.id, week, ev.repeat_weeks) });
   }));
@@ -515,6 +520,7 @@ function mount(app, deps) {
   app.post('/api/board/peer-eval/options', boardAuth, wrap(async (req, res) => {
     const who = await resolveSigner(req.body || {}, req);
     if (typeof who === 'string' || !who.staff_id) return res.status(400).json({ error: typeof who === 'string' ? who : 'Enter your PIN.' });
+    if (await evalExempt(who.staff_id)) return res.status(403).json({ error: EXEMPT_EVAL });
     const ev = await evalSettings();
     const week = weekStart(await today());
     const already = await one('SELECT subject_name FROM peer_evals WHERE week = $1 AND evaluator_id = $2', [week, who.staff_id]);
@@ -527,6 +533,7 @@ function mount(app, deps) {
     const week = weekStart(await today());
     const who = await resolveSigner(b, req);
     if (typeof who === 'string' || !who.staff_id) { if (b.staff_id && b.pin) recordFail(req); return res.status(400).json({ error: typeof who === 'string' ? who : 'Pick your name from the list.' }); }
+    if (await evalExempt(who.staff_id)) return res.status(403).json({ error: EXEMPT_EVAL });
     const subject = await one('SELECT id, name FROM staff WHERE id = $1 AND active = 1', [Number(b.subject_id)]);
     if (!subject) return res.status(400).json({ error: 'Pick a teammate to evaluate.' });
     if (subject.id === who.staff_id) return res.status(400).json({ error: "You can't evaluate yourself." });
@@ -556,7 +563,7 @@ function mount(app, deps) {
     const data = await boardData(date);
     data.is_manager = req.role === 'manager';
     // Someone signed in with their own PIN: the board knows who they are (announcements get marked read for them).
-    data.me = req.staffId ? (await one('SELECT id, name FROM staff WHERE id = $1 AND active = 1', [req.staffId])) || null : null;
+    data.me = req.staffId ? (await one('SELECT id, name, skip_announcements AS skip_ann FROM staff WHERE id = $1 AND active = 1', [req.staffId])) || null : null;
     const ev = await evalSettings();
     data.peer_eval = { enabled: ev.enabled, week: weekStart(data.today), criteria: ev.criteria,
       done: ev.enabled ? (await q('SELECT evaluator_id FROM peer_evals WHERE week = $1', [weekStart(data.today)])).map(r => r.evaluator_id) : [] };
@@ -612,7 +619,7 @@ function mount(app, deps) {
       const period = t.kind === 'weekly' ? weekStart(date) : t.kind === 'once' ? t.due_date : date;
       if (t.assign === 'each') {
         const assignees = parseIds(t.assignees);
-        const required = assignees.length ? assignees : (await q('SELECT id FROM staff WHERE active = 1')).map(s => s.id);
+        const required = assignees.length ? assignees : (await q('SELECT id FROM staff WHERE active = 1 AND NOT skip_everyone_tasks')).map(s => s.id);
         if (!required.includes(who.staff_id)) return res.status(403).json({ error: `${who.staff_name} isn't on this task.` });
         if (await one('SELECT 1 AS x FROM task_completions WHERE task_id = $1 AND period = $2 AND staff_id = $3', [t.id, period, who.staff_id]))
           return res.status(409).json({ error: `${who.staff_name} already signed this off.` });
@@ -644,7 +651,7 @@ function mount(app, deps) {
         // Everyone (or the named people) signs separately; only they can.
         if (!who.staff_id) return res.status(400).json({ error: 'Pick your name from the list for this task.' });
         const assignees = parseIds(t.assignees);
-        const required = assignees.length ? assignees : (await q('SELECT id FROM staff WHERE active = 1')).map(s => s.id);
+        const required = assignees.length ? assignees : (await q('SELECT id FROM staff WHERE active = 1 AND NOT skip_everyone_tasks')).map(s => s.id);
         if (!required.includes(who.staff_id)) return res.status(403).json({ error: `${who.staff_name} isn't on this task.` });
         try {
           const row = await one(`INSERT INTO task_completions (task_id, period, staff_id, staff_name, signature, signature_kind, note, signed_ip)
@@ -669,6 +676,7 @@ function mount(app, deps) {
     if (b.kind === 'announcement') {
       const a = await one('SELECT id FROM announcements WHERE id = $1 AND active = 1', [id]);
       if (!a) return res.status(404).json({ error: 'That announcement is gone.' });
+      if (who.staff_id && await one('SELECT 1 AS x FROM staff WHERE id = $1 AND skip_announcements', [who.staff_id])) return res.json({ ok: true, exempt: true });   // exempt: nothing to record
       await q(`INSERT INTO announcement_acks (announcement_id, staff_id, staff_name, signature, signature_kind, signed_ip)
         VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (announcement_id, LOWER(staff_name)) DO NOTHING`,
         [a.id, who.staff_id, who.staff_name, sig.signature, sig.signature_kind, ip]);
@@ -693,8 +701,9 @@ function mount(app, deps) {
   // Mark announcements read for the person signed in with their own PIN (the board calls this
   // once an announcement has been on their screen for a couple of seconds).
   app.post('/api/board/read', boardAuth, wrap(async (req, res) => {
-    const me = req.staffId ? await one('SELECT id, name FROM staff WHERE id = $1 AND active = 1', [req.staffId]) : null;
+    const me = req.staffId ? await one('SELECT id, name, skip_announcements FROM staff WHERE id = $1 AND active = 1', [req.staffId]) : null;
     if (!me) return res.status(403).json({ error: 'Sign in with your own PIN to be marked as read.' });
+    if (me.skip_announcements) return res.json({ ok: true, name: me.name, exempt: true });
     const ids = (Array.isArray((req.body || {}).ids) ? req.body.ids : []).map(Number).filter(n => Number.isInteger(n) && n > 0).slice(0, 50);
     for (const id of ids)
       await q(`INSERT INTO announcement_acks (announcement_id, staff_id, staff_name, signature, signature_kind, signed_ip)
@@ -726,7 +735,7 @@ function mount(app, deps) {
   app.get('/api/manager/overview', managerOnly, wrap(async (req, res) => {
     const todayStr = await today();
     const [staff, goal_templates, goals, goal_schedule, tasks, announcements, sms_log, completions, entries] = await Promise.all([
-      q('SELECT id, name, phone, role, active, created_at, sms_consent_at, pin FROM staff ORDER BY active DESC, name'),
+      q('SELECT id, name, phone, role, active, created_at, sms_consent_at, pin, skip_announcements AS skip_ann, skip_everyone_tasks AS skip_tasks, skip_peer_evals AS skip_evals FROM staff ORDER BY active DESC, name'),
       q('SELECT * FROM goal_templates ORDER BY active DESC, sort, id'),
       q("SELECT * FROM goals WHERE date >= $1 OR (period = 'month' AND date >= $2) ORDER BY date, sort, id", [addDays(todayStr, -1), todayStr.slice(0, 7) + '-01']),
       q(`SELECT template_id, COUNT(*)::int AS days, MIN(date) AS from_date, MAX(date) AS to_date,
@@ -747,7 +756,8 @@ function mount(app, deps) {
     const ackMap = {};
     for (const a of annAcks) (ackMap[a.announcement_id] = ackMap[a.announcement_id] || []).push({ staff_name: a.staff_name, signed_at: a.signed_at });
     const onBoard = a => !!a.active && (a.expires_on ? a.expires_on >= todayStr : (!!a.pinned || annDays === 0 || new Date(a.created_at).getTime() > Date.now() - annDays * 86400000));
-    const announcementsOut = announcements.map(a => ({ ...a, acks: ackMap[a.id] || [], on_board: onBoard(a), hidden_why: !a.active ? 'off' : onBoard(a) ? '' : a.expires_on ? 'expired' : 'aged' }));
+    const mustRead = staff.filter(p => p.active && !p.skip_ann).map(p => p.name);   // exempt people aren't expected to read
+    const announcementsOut = announcements.map(a => ({ ...a, acks: ackMap[a.id] || [], unread: mustRead.filter(n => !(ackMap[a.id] || []).some(k => String(k.staff_name).toLowerCase() === n.toLowerCase())), on_board: onBoard(a), hidden_why: !a.active ? 'off' : onBoard(a) ? '' : a.expires_on ? 'expired' : 'aged' }));
     // PINs never leave the server: the panel only learns who has one, and whether two people share one.
     const s = await db.getAllSettings();
     const pinCount = {}, reserved = new Set([s.manager_pin || '', (s.board_pass || '').trim()]);
@@ -798,6 +808,7 @@ function mount(app, deps) {
     const name = clean(b.name, 80);
     if (!name) return res.status(400).json({ error: 'Name is required.' });
     const role = b.role === 'manager' ? 'manager' : 'employee';
+    const flag = v => v === true || v === 1 || v === '1' || v === 'true';
     const phone = clean(b.phone, 30), active = isOff(b.active) ? 0 : 1;
     if (b.pin != null && String(b.pin).trim() && !/^\d{4,8}$/.test(String(b.pin).trim()))
       return res.status(400).json({ error: 'PIN must be 4–8 digits.' });
@@ -813,11 +824,13 @@ function mount(app, deps) {
       const cur = await one('SELECT * FROM staff WHERE id = $1', [Number(b.id)]);
       if (!cur) return res.status(404).json({ error: 'Not found.' });
       const pin = b.pin == null ? cur.pin : String(b.pin).trim(); // undefined = keep, '' = clear
-      await q('UPDATE staff SET name=$2, phone=$3, role=$4, pin=$5, active=$6 WHERE id=$1', [cur.id, name, phone, role, pin, active]);
+      const keep = (v, old) => (v == null ? !!old : flag(v));
+      await q('UPDATE staff SET name=$2, phone=$3, role=$4, pin=$5, active=$6, skip_announcements=$7, skip_everyone_tasks=$8, skip_peer_evals=$9 WHERE id=$1',
+        [cur.id, name, phone, role, pin, active, keep(b.skip_ann, cur.skip_announcements), keep(b.skip_tasks, cur.skip_everyone_tasks), keep(b.skip_evals, cur.skip_peer_evals)]);
       return res.json({ ok: true, id: cur.id });
     }
-    const row = await one('INSERT INTO staff (name, phone, role, pin, active) VALUES ($1,$2,$3,$4,$5) RETURNING id',
-      [name, phone, role, String(b.pin || '').trim(), active]);
+    const row = await one('INSERT INTO staff (name, phone, role, pin, active, skip_announcements, skip_everyone_tasks, skip_peer_evals) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id',
+      [name, phone, role, String(b.pin || '').trim(), active, flag(b.skip_ann), flag(b.skip_tasks), flag(b.skip_evals)]);
     res.json({ ok: true, id: row.id });
   }));
 

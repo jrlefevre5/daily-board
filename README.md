@@ -120,6 +120,15 @@ PIN to sign**:
 - The setting is off by default so nobody is locked out before everyone has a PIN.
   PINs are stored as entered and never sent back to the browser.
 
+## Exemptions
+
+Everyone has to do everything by default. On **Staff → Edit** you can switch on,
+per person and separately: **exempt from marking announcements read** (not
+auto-tracked, and left off the manager's "Not read yet" list), **exempt from tasks
+assigned to everyone** (not required, not texted or pushed for them — a task
+given to them by name still counts), and **exempt from peer evaluations** (not
+asked to do one and blocked from submitting; teammates can still rate them).
+
 ## App notifications
 
 Install the app (above), open it, and tap the **🔕 bell** in the top bar to allow
