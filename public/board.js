@@ -435,11 +435,21 @@ const goalCard = canSign => g => {
   const pct = g.target > 0 ? Math.min(100, Math.round(g.actual / g.target * 100)) : (g.actual > 0 ? 100 : 0);
   const met = g.target > 0 && g.actual >= g.target;
   const last = g.entries[g.entries.length - 1];
+  // A monthly goal adds up everything logged this month; show how it's pacing.
+  const monthly = g.period === 'month';
+  let pace = '';
+  if (monthly && !met && g.target > 0 && data.today.slice(0, 7) === g.month) {
+    const [y, m] = g.month.split('-').map(Number), dim = new Date(Date.UTC(y, m, 0)).getUTCDate(), dom = Number(data.today.slice(8, 10));
+    const left = g.target - g.actual, daysLeft = dim - dom + 1, ahead = g.actual >= g.target * dom / dim;
+    pace = `<div class="mini" style="margin-top:6px">${esc(fmtAmt(left, g.unit))} to go · ${daysLeft} day${daysLeft === 1 ? '' : 's'} left · about ${esc(fmtAmt(left / daysLeft, g.unit))} a day <span class="chip ${ahead ? 'sms' : 'due'}">${ahead ? 'on pace' : 'behind pace'}</span></div>`;
+  }
+  const monthName = monthly ? new Date(g.month + '-01T00:00:00Z').toLocaleDateString('en-US', { month: 'long', timeZone: 'UTC' }) : '';
   return `<div class="goal ${met ? 'met' : ''}">
     ${met ? '<div class="met-tag">MET ✓</div>' : ''}
-    <div class="lbl">${esc(g.label)}${g.baseline != null ? ` <span class="chip" title="Last year's number this goal is based on">LY ${esc(fmtAmt(g.baseline, g.unit))}</span>` : ''}</div>
+    <div class="lbl">${esc(g.label)}${monthly ? ` <span class="chip">${esc(monthName)}</span>` : ''}${g.baseline != null ? ` <span class="chip" title="Last year's number this goal is based on">LY ${esc(fmtAmt(g.baseline, g.unit))}</span>` : ''}</div>
     <div class="nums">${esc(fmtAmt(g.actual, g.unit))} <small>/ ${esc(fmtAmt(g.target, g.unit))}</small></div>
     <div class="track"><div class="fill" style="width:${pct}%"></div></div>
+    ${pace}
     <div class="foot">
       <span class="who">${last ? `Last: ${esc(last.staff_name)} +${esc(fmtAmt(last.amount, g.unit))}` : 'Nothing logged yet'}</span>
       ${canSign ? `<button class="small ${met ? 'green' : ''}" onclick="openSign('goal', ${g.id})">+ Log</button>` : ''}
@@ -601,8 +611,9 @@ window.openSign = (kind, id, staffId = 0) => {
     if (data.require_pin) sub += ' — just your PIN, no signature needed.';
   } else {
     const g = data.goals.find(x => x.id === id);
-    title = `Log progress: ${g.label}`; sub = `Now at ${fmtAmt(g.actual, g.unit)} of ${fmtAmt(g.target, g.unit)}.`;
-    extra = `<label>How much to add?</label>
+    const mon = g.period === 'month', mname = mon ? new Date(g.month + '-01T00:00:00Z').toLocaleDateString('en-US', { month: 'long', timeZone: 'UTC' }) : '';
+    title = `Log progress: ${g.label}`; sub = `${mon ? mname + ': now' : 'Now'} at ${fmtAmt(g.actual, g.unit)} of ${fmtAmt(g.target, g.unit)}.`;
+    extra = `<label>${mon ? (g.unit === 'dollars' ? 'How much revenue to add?' : 'How many units to add?') : 'How much to add?'}</label>
       <div style="display:flex;gap:8px;align-items:center">
         ${g.unit === 'dollars' ? '<span style="font-weight:800;font-size:20px">$</span>' : ''}
         <input class="inline" id="sg_amount" type="number" step="${g.unit === 'dollars' ? '0.01' : '1'}" inputmode="decimal" value="${g.unit === 'dollars' ? '' : '1'}" placeholder="${g.unit === 'dollars' ? '0.00' : '1'}" style="max-width:160px">
@@ -800,13 +811,21 @@ function renderManager() {
 const onoff = a => a ? '' : '<span class="chip">Off</span>';
 
 function mgrGoals() {
-  const todays = mgr.goals.filter(g => g.date === mgr.today);
-  return `<p class="kicker-note">Recurring goals copy onto every new day automatically. Today's copies are listed below — edit one there to change just today.</p>
+  const todays = mgr.goals.filter(g => g.period !== 'month' && g.date === mgr.today);
+  const monthStart = mgr.today.slice(0, 7) + '-01', thisMonth = mgr.goals.filter(g => g.period === 'month' && g.date === monthStart);
+  const monthName = new Date(monthStart + 'T00:00:00Z').toLocaleDateString('en-US', { month: 'long', timeZone: 'UTC' });
+  return `<p class="kicker-note">Recurring goals copy onto every new day — or, for a <b>monthly</b> goal (e.g. units or revenue for the month), onto every new month — automatically. This month's and today's copies are listed below; edit one there to change just that period.</p>
     <div class="tools"><b>Recurring goals</b><div class="spacer"></div><button class="small" onclick="editGoalTemplate()">+ Add recurring goal</button></div>
-    <table class="list"><tr><th>Goal</th><th>Unit</th><th>Daily target</th><th></th></tr>
-      ${mgr.goal_templates.map(t => `<tr class="${t.active ? '' : 'off'}"><td>${esc(t.label)} ${onoff(t.active)}</td><td>${t.unit}</td><td>${esc(fmtAmt(t.target, t.unit))}</td>
+    <table class="list"><tr><th>Goal</th><th>Unit</th><th>Repeats</th><th>Target</th><th></th></tr>
+      ${mgr.goal_templates.map(t => `<tr class="${t.active ? '' : 'off'}"><td>${esc(t.label)} ${onoff(t.active)}</td><td>${t.unit}</td><td>${t.period === 'month' ? 'every month' : 'every day'}</td><td>${esc(fmtAmt(t.target, t.unit))} <span class="mini">${t.period === 'month' ? 'per month' : 'per day'}</span></td>
         <td class="acts"><button class="mini-btn" onclick="editGoalTemplate(${t.id})">Edit</button> <button class="mini-btn danger" onclick="delGoalTemplate(${t.id})">Delete</button></td></tr>`).join('')
-        || '<tr><td colspan="4" class="empty">None yet — add things like "Units sold", "New accounts", "Revenue"…</td></tr>'}
+        || '<tr><td colspan="5" class="empty">None yet — add things like "Units sold", "New accounts", "Revenue"…</td></tr>'}
+    </table>
+    <div class="tools" style="margin-top:22px"><b>This month's goals (${esc(monthName)})</b></div>
+    <table class="list"><tr><th>Goal</th><th>Unit</th><th>Month target</th><th></th></tr>
+      ${thisMonth.map(g => `<tr><td>${esc(g.label)}</td><td>${g.unit}</td><td>${esc(fmtAmt(g.target, g.unit))}</td>
+        <td class="acts"><button class="mini-btn" onclick="editGoalDay(${g.id})">Edit</button> <button class="mini-btn danger" onclick="delGoalDay(${g.id})">Remove</button></td></tr>`).join('')
+        || '<tr><td colspan="4" class="empty">No monthly goals. Add a recurring goal and set it to repeat every month.</td></tr>'}
     </table>
     <div class="tools" style="margin-top:22px"><b>Imported daily targets</b><span class="mini">e.g. last year's revenue by day, +5% — overrides the daily target on each date it covers.</span><div class="spacer"></div><button class="small" onclick="importSchedule()">Import from last year…</button></div>
     <table class="list"><tr><th>Goal</th><th>Days covered</th><th>From</th><th>To</th><th></th></tr>
@@ -823,11 +842,12 @@ function mgrGoals() {
     </table>`;
 }
 window.editGoalTemplate = id => {
-  const t = mgr.goal_templates.find(x => x.id === id) || { label: '', unit: 'count', target: 0, sort: mgr.goal_templates.length + 1, active: 1 };
+  const t = mgr.goal_templates.find(x => x.id === id) || { label: '', unit: 'count', period: 'day', target: 0, sort: mgr.goal_templates.length + 1, active: 1 };
   formModal(id ? 'Edit recurring goal' : 'New recurring goal', [
     { k: 'label', l: 'Goal', v: t.label, ph: 'e.g. Units sold' },
-    { k: 'unit', l: 'Unit', v: t.unit, type: 'select', opts: [['count', 'Count (e.g. 5 sales)'], ['dollars', 'Dollars ($)']] },
-    { k: 'target', l: 'Daily target', v: t.target, type: 'number' },
+    { k: 'unit', l: 'Unit', v: t.unit, type: 'select', opts: [['count', 'Units / count (e.g. 5 sales)'], ['dollars', 'Revenue — dollars ($)']] },
+    { k: 'period', l: 'Repeats', v: t.period || 'day', type: 'select', opts: [['day', 'Every day — a new target each day'], ['month', 'Every month — one target for the whole month']] },
+    { k: 'target', l: 'Target (per day, or per month for a monthly goal)', v: t.target, type: 'number' },
     { k: 'sort', l: 'Order', v: t.sort, type: 'number' },
     { k: 'active', l: 'Active', v: t.active ? '1' : '0', type: 'select', opts: [['1', 'Yes — on the board every day'], ['0', 'No — paused']] },
   ], f => api('/api/manager/goal-template', { id, ...f, active: f.active === '1' }));
@@ -835,7 +855,7 @@ window.editGoalTemplate = id => {
 window.delGoalTemplate = async id => { if (confirm('Delete this recurring goal? Past days keep their numbers.')) { await api('/api/manager/goal-template', { id, remove: true }); reloadMgr(); } };
 window.editGoalDay = id => {
   const g = mgr.goals.find(x => x.id === id) || { date: mgr.today, label: '', unit: 'count', target: 0 };
-  formModal(id ? `Edit goal for ${fmtShort(g.date)}` : 'One-time goal', [
+  formModal(id ? (g.period === 'month' ? `Edit ${new Date(g.date + 'T00:00:00Z').toLocaleDateString('en-US', { month: 'long', timeZone: 'UTC' })} goal` : `Edit goal for ${fmtShort(g.date)}`) : 'One-time goal', [
     ...(id ? [] : [{ k: 'date', l: 'Day', v: g.date, type: 'date' }]),
     { k: 'label', l: 'Goal', v: g.label },
     { k: 'unit', l: 'Unit', v: g.unit, type: 'select', opts: [['count', 'Count'], ['dollars', 'Dollars ($)']] },
@@ -845,8 +865,8 @@ window.editGoalDay = id => {
 // Import dialog: paste or upload last year's numbers, pick how dates map onto this year, preview, import.
 let schedTimer = null;
 window.importSchedule = templateId => {
-  const tpls = mgr.goal_templates.filter(t => t.active);
-  if (!tpls.length) return alert('Add a recurring goal first (e.g. "Revenue", dollars), then import its schedule.');
+  const tpls = mgr.goal_templates.filter(t => t.active && t.period !== 'month');
+  if (!tpls.length) return alert('Add a daily recurring goal first (e.g. "Revenue", dollars), then import its schedule. Imported targets are per day, so monthly goals don\'t use them.');
   const has = id => mgr.goal_schedule.some(s => s.template_id === id);
   $modal.innerHTML = `<div class="modal-back" onclick="if(event.target===this)closeModal()"><div class="modal" style="max-width:640px">
     <h3>Import daily targets</h3>
