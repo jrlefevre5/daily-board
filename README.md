@@ -144,6 +144,16 @@ the board is **Settings → Shift highlights & shoutouts** (default 7 days, 0 =
 no limit). The manager **Tasks** tab lists today's tasks as *Not completed* and
 *Completed*, with everything else (other days, switched off) below.
 
+## Staff notes
+
+A **Staff notes** panel on the board holds notes for the whole team. Anyone adds
+one with **+ Add a note** (PIN or name pick says who wrote it), or by text:
+anyone whose phone is on the roster can text `NOTE <message>` to the board
+number (a manager can text `NOTE PIN <message>` to pin it). Managers can **pin,
+unpin or delete** any note right on the board or under **Manager panel → Staff
+notes**. Pinned notes stay at the top; others show for 30 days. Notes send no
+notifications.
+
 ## Reminders
 
 Under **Settings → Task reminder**: a time (store time) for a daily push about

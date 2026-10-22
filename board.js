@@ -40,6 +40,7 @@ function localToday(tz) {
 //   DAILY <text>                 recurring daily task
 //   WEEKLY [Mon..Sun] <text>     recurring weekly task, optionally due a weekday
 //   GOAL <label> <number>        set/replace today's target ("GOAL memberships 5", "GOAL revenue $1200")
+//   NOTE <text>                  staff note (any rostered phone); NOTE PIN <text> pins it (managers)
 //   HELP                         reply with this list
 // Returns { action, text, kind?, dow?, label?, target?, unit? } — action 'help' or 'error' otherwise.
 function parseSms(raw, defaultKind = 'announcement') {
@@ -67,6 +68,11 @@ function parseSms(raw, defaultKind = 'announcement') {
     }
     return text ? taskCmd('weekly', text, { dow }) : { action: 'error', text: 'Nothing to post after WEEKLY.' };
   }
+  if (['note', 'notes', 'staffnote'].includes(word)) {
+    const pm = rest.match(/^pin(?:ned)?\b\s*[:\-]?\s*(.*)$/i);
+    const text = pm ? pm[1].trim() : rest;
+    return text ? { action: 'note', text, pinned: !!pm } : { action: 'error', text: 'Nothing to save after NOTE.' };
+  }
   if (['goal', 'target'].includes(word)) {
     const nm = rest.match(/(\$)?\s*(\d[\d,]*(?:\.\d+)?)\s*(\$|dollars?|bucks)?/i);
     if (!nm) return { action: 'error', text: 'GOAL needs a number, e.g. "GOAL memberships 5" or "GOAL revenue $1200".' };
@@ -92,7 +98,7 @@ function parseIds(json) { try { const a = JSON.parse(json || '[]'); return Array
 const HELP_TEXT = 'Board commands — start your text with one:\n' +
   'ANNOUNCE <message>\nTASK <message> (today)\nDAILY <message>\nWEEKLY [Mon..Sun] <message>\n' +
   'Add ALL for everyone-signs (TASK ALL …) or @Name for one person (TASK @Sam …)\n' +
-  'GOAL <name> <number> (e.g. GOAL memberships 5)\nNo keyword = announcement. Attach a photo to include it.';
+  'GOAL <name> <number> (e.g. GOAL memberships 5)\nNOTE <message> = staff note (NOTE PIN <message> pins it)\nNo keyword = announcement. Attach a photo to include it.';
 
 // ---------- goal schedule import ----------
 // Turns pasted/uploaded text (CSV from a POS export, a spreadsheet, or just
@@ -679,6 +685,8 @@ function mount(app, deps) {
       done: ev.enabled ? (await q('SELECT evaluator_id FROM peer_evals WHERE week = $1', [weekStart(data.today)])).map(r => r.evaluator_id) : [] };
     data.highlights = await q(`SELECT id, kind, author_name, subject_name, body, created_at FROM highlights
       WHERE $1::int = 0 OR created_at > now() - make_interval(days => $1::int) ORDER BY id DESC LIMIT 30`, [await highlightDays()]);
+    data.notes = await q(`SELECT id, body, author_name, source, pinned, created_at FROM staff_notes
+      WHERE pinned = 1 OR created_at > now() - interval '30 days' ORDER BY pinned DESC, id DESC LIMIT 40`);
     res.json(data);
   }));
 
@@ -701,6 +709,25 @@ function mount(app, deps) {
       VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`, [kind, who.staff_id, who.staff_name, subject ? subject.id : null, subject ? subject.name : '', body]);
     await pushHighlight({ id: row.id, kind, author_name: who.staff_name, subject_name: subject ? subject.name : '', body }, who.staff_id || 0);
     res.json({ ok: true, id: row.id });
+  }));
+
+  // Staff notes: anyone can add one (PIN / name pick says who); managers can pin, unpin and delete.
+  app.post('/api/board/note', boardAuth, wrap(async (req, res) => {
+    const b = req.body || {};
+    const who = await resolveSigner(b, req);
+    if (typeof who === 'string') { if (b.staff_id && b.pin) recordFail(req); return res.status(400).json({ error: who }); }
+    const body = clean(b.body, 1000);
+    if (!body) return res.status(400).json({ error: 'Write the note first.' });
+    const row = await one(`INSERT INTO staff_notes (body, author_id, author_name, source, pinned) VALUES ($1,$2,$3,'board',$4) RETURNING id`,
+      [body, who.staff_id, who.staff_name, req.role === 'manager' && b.pinned ? 1 : 0]);
+    res.json({ ok: true, id: row.id });
+  }));
+  app.post('/api/manager/note', managerOnly, wrap(async (req, res) => {
+    const b = req.body || {}, id = Number(b.id);
+    if (!(id > 0)) return res.status(400).json({ error: 'Which note?' });
+    if (b.remove) await q('DELETE FROM staff_notes WHERE id = $1', [id]);
+    else if (b.pinned != null) await q('UPDATE staff_notes SET pinned = $2 WHERE id = $1', [id, b.pinned ? 1 : 0]);
+    res.json({ ok: true });
   }));
 
   // Who is signing. With "Require employee PIN" on, the PIN alone picks the person (the board
@@ -905,6 +932,7 @@ function mount(app, deps) {
     res.json({
       today: todayStr, staff: staffOut, pin_issues, peer_evals, eval_settings: ev,
       task_state: [...todayBoard.tasks_today, ...todayBoard.tasks_week].map(t => ({ id: t.id, done: !!t.done, by: t.completions.map(c => c.staff_name), needs: t.required ? t.required.length : 1 })),
+      staff_notes: await q('SELECT id, body, author_name, source, pinned, created_at FROM staff_notes ORDER BY pinned DESC, id DESC LIMIT 300'),
       highlights: await q("SELECT id, kind, author_name, subject_name, body, created_at FROM highlights WHERE created_at > now() - interval '90 days' ORDER BY id DESC LIMIT 300"),
       goal_templates: goal_templates.map(t => ({ ...t, target: Number(t.target) })),
       goals: goals.map(g => ({ ...g, target: Number(g.target), baseline: g.baseline == null ? null : Number(g.baseline) })),
@@ -1301,8 +1329,9 @@ function mount(app, deps) {
       [from.slice(0, 40), fields.staff_name || '', text.slice(0, 4000), media.slice(0, 1000), fields.action, fields.target_id || null, fields.reply || '']);
 
     const key = phoneKey(from);
-    const sender = key ? (await q("SELECT * FROM staff WHERE active = 1 AND role = 'manager' AND phone <> ''")).find(s => phoneKey(s.phone) === key) : null;
-    if (!sender) {
+    const sender = key ? (await q("SELECT * FROM staff WHERE active = 1 AND phone <> ''")).find(s => phoneKey(s.phone) === key) : null;
+    // Managers can post anything; everyone else on the roster can only text a NOTE.
+    if (!sender || (sender.role !== 'manager' && !/^#?(note|notes|staffnote)\b/i.test(text))) {
       // Silent to strangers (no auto-reply loops, no SMS spend); the attempt shows in the manager panel.
       await log({ action: 'rejected' });
       return reply('');
@@ -1324,6 +1353,12 @@ function mount(app, deps) {
         const { sent } = await broadcastAnnouncement({ id: row.id, title: '', body: cmd.text || '(photo)', media_url: media, created_by: sender.name }, key);
         if (sent) msg += ` Texted ${sent} ${sent === 1 ? 'person' : 'people'}.`;
       }
+    } else if (cmd.action === 'note') {
+      const pinned = !!cmd.pinned && sender.role === 'manager';
+      const row = await one(`INSERT INTO staff_notes (body, author_id, author_name, source, pinned) VALUES ($1,$2,$3,'sms',$4) RETURNING id`,
+        [cmd.text.slice(0, 1000), sender.id, sender.name, pinned ? 1 : 0]);
+      action = 'note'; targetId = row.id;
+      msg = pinned ? 'Pinned to staff notes \u2713' : 'Added to staff notes \u2713';
     } else if (cmd.action === 'task') {
       let assign = 'anyone', assignees = [], whoNote = '';
       if (cmd.assign === 'all') { assign = 'each'; whoNote = ' — everyone signs'; }

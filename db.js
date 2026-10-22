@@ -180,6 +180,15 @@ CREATE TABLE IF NOT EXISTS announcement_acks (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ack_once_idx ON announcement_acks (announcement_id, LOWER(staff_name));
 -- Weekly peer evaluations: each person rates one teammate per week (Mon–Sun).
+CREATE TABLE IF NOT EXISTS staff_notes (       -- the team's shared notes (board or text-in); managers can pin them
+  id SERIAL PRIMARY KEY,
+  body TEXT NOT NULL,
+  author_id INTEGER,
+  author_name TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'board',      -- 'board' | 'sms'
+  pinned INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS highlights (       -- shift highlights and peer shoutouts
   id SERIAL PRIMARY KEY,
   kind TEXT NOT NULL DEFAULT 'highlight',    -- 'highlight' (something good on a shift) | 'shoutout' (praise for a teammate)
@@ -253,7 +262,7 @@ END $$;
 `;
 
 // Bump when DDL or defaults change; a mismatch replays the (idempotent) migration.
-const SCHEMA_VERSION = '13';
+const SCHEMA_VERSION = '14';
 
 async function ensureDefaults() {
   const setDefault = (k, v) => q('INSERT INTO settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO NOTHING', [k, v]);
