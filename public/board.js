@@ -326,6 +326,7 @@ function render() {
       </div>
     </div>
     ${highlightsPanel(canSign)}
+    ${notesPanel(canSign)}
     ${data.sms_number ? `<p class="mini" style="text-align:center">Managers: text <b>${esc(data.sms_number)}</b> to post — start with ANNOUNCE, TASK, DAILY, WEEKLY, or GOAL (or HELP).</p>` : ''}`;
   watchAnnouncements();
 }
@@ -345,6 +346,44 @@ window.sendRemindersNow = async weekly => {
   const out = await api('/api/manager/send-reminders', { weekly: !!weekly }), el = document.getElementById('st_remind_out');
   if (el) el.textContent = out.error ? out.error : out.open ? `Sent to ${out.sent} device${out.sent === 1 ? '' : 's'} (${out.open} open task${out.open === 1 ? '' : 's'}).` : 'Nothing is open.';
 };
+// ---------- staff notes ----------
+function notesPanel(canDo) {
+  const list = data.notes || [], mgrOn = !!data.is_manager;
+  const item = n => `<div class="hl"><span class="hl-ic">${n.pinned ? '\ud83d\udccc' : '\ud83d\udcdd'}</span><div><div>${esc(n.body)}</div>
+    <div class="mini">${esc(n.author_name)}${n.source === 'sms' ? ' <span class="chip sms">text</span>' : ''} \u00b7 ${esc(fmtStamp(n.created_at))}${n.pinned ? ' \u00b7 <b>Pinned</b>' : ''}${mgrOn ? ` \u00b7 <a href="#" onclick="notePin(${n.id}, ${n.pinned ? 0 : 1}); return false">${n.pinned ? 'Unpin' : 'Pin'}</a> \u00b7 <a href="#" onclick="noteDel(${n.id}); return false">Delete</a>` : ''}</div></div></div>`;
+  return `<div class="panel">
+    <h2>Staff notes <span class="count">${list.length || ''}</span></h2>
+    ${canDo ? `<div style="margin:0 0 10px"><button class="small" onclick="openNote()">+ Add a note</button>${data.sms_number ? ` <span class="mini">or text <b>NOTE &hellip;</b> to ${esc(data.sms_number)}</span>` : ''}</div>` : ''}
+    ${list.length ? list.map(item).join('') : `<div class="empty">No notes yet &mdash; add something the whole team should know.</div>`}
+  </div>`;
+}
+window.openNote = () => {
+  $modal.innerHTML = `<div class="modal-back" onclick="if(event.target===this)closeModal()"><div class="modal">
+    <h3>Add a staff note</h3><p class="sub">Visible to the whole team on the board.</p>
+    <form onsubmit="submitNote(); return false">
+      ${staffPicker('nt')}
+      <label>Note</label>
+      <textarea class="inline" id="nt_body" maxlength="1000" placeholder="Something the team should know or remember&hellip;"></textarea>
+      ${data.is_manager ? `<label>Pin it to the top?</label><select class="inline" id="nt_pin"><option value="0">No</option><option value="1">Yes &mdash; pin it</option></select>` : ''}
+      <div class="err" id="nt_err"></div>
+      <div class="row"><button type="button" class="small ghost" onclick="closeModal()">Cancel</button><button type="submit" class="small green" id="nt_go">Add note</button></div>
+    </form>
+  </div></div>`;
+  onStaffPick('nt');
+};
+window.submitNote = async () => {
+  const err = document.getElementById('nt_err'), go = document.getElementById('nt_go');
+  const body = { ...signerFields('nt'), body: document.getElementById('nt_body').value.trim(), pinned: (document.getElementById('nt_pin') || {}).value === '1' };
+  if (!body.body) { err.textContent = 'Write the note first.'; return; }
+  go.disabled = true; err.textContent = '';
+  const out = await api('/api/board/note', body);
+  go.disabled = false;
+  if (out.error) { err.textContent = out.error; return; }
+  if (body.staff_id) { lastStaff = body.staff_id; localStorage.setItem('db_me', String(lastStaff)); }
+  closeModal(); await loadBoard();
+};
+window.notePin = async (id, pinned) => { await api('/api/manager/note', { id, pinned: !!pinned }); await loadBoard(); };
+window.noteDel = async id => { if (confirm('Delete this note?')) { await api('/api/manager/note', { id, remove: true }); await loadBoard(); } };
 window.openHL = kind => {
   const shout = kind === 'shoutout';
   $modal.innerHTML = `<div class="modal-back" onclick="if(event.target===this)closeModal()"><div class="modal">
@@ -844,7 +883,7 @@ async function reloadMgr() {
 }
 
 function renderManager() {
-  const tabs = [['goals', 'Goals'], ['tasks', 'Tasks'], ['announcements', 'Announcements'], ['staff', 'Staff'], ['sms', 'Text-in'], ['activity', 'Activity'], ['highlights', 'Highlights'], ['evals', 'Past evaluations'], ['branding', 'Branding'], ['settings', 'Settings']];
+  const tabs = [['goals', 'Goals'], ['tasks', 'Tasks'], ['announcements', 'Announcements'], ['staff', 'Staff'], ['sms', 'Text-in'], ['activity', 'Activity'], ['highlights', 'Highlights'], ['notes', 'Staff notes'], ['evals', 'Past evaluations'], ['branding', 'Branding'], ['settings', 'Settings']];
   document.getElementById('topRight').textContent = 'Manager panel'; syncRefreshBtn();
   $app.innerHTML = `
     <div class="bar">
@@ -855,7 +894,7 @@ function renderManager() {
       <button class="mini-btn" onclick="managerLogout()">Sign out</button>
     </div>
     <div class="tabs">${tabs.map(([k, l]) => `<button class="${mgrTab === k ? 'on' : ''}" onclick="mgrTabTo('${k}')">${l}</button>`).join('')}</div>
-    <div class="panel">${({ goals: mgrGoals, tasks: mgrTasks, announcements: mgrAnns, staff: mgrStaff, sms: mgrSms, activity: mgrActivity, highlights: mgrHighlights, evals: mgrEvals, branding: mgrBranding, settings: mgrSettings })[mgrTab]()}</div>`;
+    <div class="panel">${({ goals: mgrGoals, tasks: mgrTasks, announcements: mgrAnns, staff: mgrStaff, sms: mgrSms, activity: mgrActivity, highlights: mgrHighlights, notes: mgrNotes, evals: mgrEvals, branding: mgrBranding, settings: mgrSettings })[mgrTab]()}</div>`;
   if (mgrTab === 'branding') brandPreview();
 }
 
@@ -1217,6 +1256,16 @@ window.downloadCsv = () => {
 };
 
 // ---------- Evaluations tab ----------
+function mgrNotes() {
+  const rows = mgr.staff_notes || [];
+  return `<p class="kicker-note">Notes the team adds from the board or by text (<b>NOTE &hellip;</b>; managers can text <b>NOTE PIN &hellip;</b> to pin one). Pinned notes stay at the top of the board; the others stay for 30 days. Anyone's note can be pinned or removed here.</p>
+    <table class="list"><tr><th></th><th>Note</th><th>By</th><th></th></tr>
+      ${rows.map(n => `<tr><td>${n.pinned ? '\ud83d\udccc' : '\ud83d\udcdd'}</td><td>${esc(n.body)}</td><td class="mini">${esc(n.author_name)}${n.source === 'sms' ? ' <span class="chip sms">text</span>' : ''}<br>${esc(fmtStamp(n.created_at))}</td>
+        <td class="acts"><button class="mini-btn" onclick="mgrNotePin(${n.id}, ${n.pinned ? 0 : 1})">${n.pinned ? 'Unpin' : 'Pin'}</button> <button class="mini-btn danger" onclick="mgrNoteDel(${n.id})">Delete</button></td></tr>`).join('') || '<tr><td colspan="4" class="empty">No notes yet.</td></tr>'}
+    </table>`;
+}
+window.mgrNotePin = async (id, pinned) => { await api('/api/manager/note', { id, pinned: !!pinned }); reloadMgr(); };
+window.mgrNoteDel = async id => { if (confirm('Delete this note?')) { await api('/api/manager/note', { id, remove: true }); reloadMgr(); } };
 function mgrHighlights() {
   const rows = mgr.highlights || [];
   return `<p class="kicker-note">Shift highlights and peer shoutouts posted from the board (last 90 days). Everyone with notifications on is told when one is posted; the board shows the last 7 days. Remove anything that doesn't belong.</p>
