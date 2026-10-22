@@ -325,8 +325,8 @@ function render() {
         ${weekList.length ? weekList.map(taskRow(canSign)).join('') : `<div class="empty">${data.tasks_week.length ? 'All done for this week ✓' : 'No weekly tasks yet.'}</div>`}
       </div>
     </div>
-    ${highlightsPanel(canSign)}
     ${notesPanel(canSign)}
+    ${highlightsPanel(canSign)}
     ${data.sms_number ? `<p class="mini" style="text-align:center">Managers: text <b>${esc(data.sms_number)}</b> to post — start with ANNOUNCE, TASK, DAILY, WEEKLY, or GOAL (or HELP).</p>` : ''}`;
   watchAnnouncements();
 }
